@@ -173,16 +173,15 @@ N_COLOR_CHANNELS = 3
 
 
 # config
-@dataclass
+@dataclass(init=False)
 class GR00TN15Config(PretrainedConfig):
-    
-    backbone_cfg: dict = field(init=False, metadata={"help": "Backbone configuration."})
+    backbone_cfg: dict = field(default_factory=dict, metadata={"help": "Backbone configuration."})
 
-    action_head_cfg: dict = field(init=False, metadata={"help": "Action head configuration."})
+    action_head_cfg: dict = field(default_factory=dict, metadata={"help": "Action head configuration."})
 
-    action_horizon: int = field(init=False, metadata={"help": "Action horizon."})
+    action_horizon: int = field(default=0, metadata={"help": "Action horizon."})
 
-    action_dim: int = field(init=False, metadata={"help": "Action dimension."})
+    action_dim: int = field(default=0, metadata={"help": "Action dimension."})
     
     model_type = "gr00t_n1_5"
     compute_dtype: str = field(default="float32", metadata={"help": "Compute dtype."})
