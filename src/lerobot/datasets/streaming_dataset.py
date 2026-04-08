@@ -16,6 +16,7 @@
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator
 from pathlib import Path
+from typing import Generic, TypeVar
 
 import datasets
 import numpy as np
@@ -36,6 +37,7 @@ from lerobot.datasets.video_utils import (
     decode_video_frames_torchcodec,
 )
 from lerobot.utils.constants import HF_LEROBOT_HOME, LOOKAHEAD_BACKTRACKTABLE, LOOKBACK_BACKTRACKTABLE
+T = TypeVar("T")
 
 
 class LookBackError(Exception):
@@ -54,7 +56,7 @@ class LookAheadError(Exception):
     pass
 
 
-class Backtrackable[T]:
+class Backtrackable(Generic[T]):
     """
     Wrap any iterator/iterable so you can step back up to `history` items
     and look ahead up to `lookahead` items.
@@ -240,7 +242,7 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         root: str | Path | None = None,
         episodes: list[int] | None = None,
         image_transforms: Callable | None = None,
-        delta_timestamps: dict[list[float]] | None = None,
+        delta_timestamps: dict[str, list[float]] | None = None,
         tolerance_s: float = 1e-4,
         revision: str | None = None,
         force_cache_sync: bool = False,
@@ -669,7 +671,7 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
 
         return query_result, padding
 
-    def _validate_delta_timestamp_keys(self, delta_timestamps: dict[list[float]]) -> None:
+    def _validate_delta_timestamp_keys(self, delta_timestamps: dict[str, list[float]]) -> None:
         """
         Validate that all keys in delta_timestamps correspond to actual features in the dataset.
 
