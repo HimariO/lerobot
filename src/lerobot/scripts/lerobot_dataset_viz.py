@@ -85,6 +85,11 @@ def to_hwc_uint8_numpy(chw_float32_torch: torch.Tensor) -> np.ndarray:
     return hwc_uint8_numpy
 
 
+def get_feature_names(feature: dict | None) -> list[str]:
+    names = feature.get("names") if feature else None
+    return [str(name) for name in names] if isinstance(names, list) else []
+
+
 def visualize_dataset(
     dataset: LeRobotDataset,
     episode_index: int,
@@ -131,6 +136,8 @@ def visualize_dataset(
         rr.serve_web_viewer(open_browser=False, web_port=web_port, connect_to=server_uri)
 
     logging.info("Logging to Rerun")
+    action_feature_names = get_feature_names(dataset.features.get(ACTION))
+    obs_state_feature_names = get_feature_names(dataset.features.get(OBS_STATE))
 
     first_index = None
     for batch in tqdm.tqdm(dataloader, total=len(dataloader)):
@@ -150,12 +157,22 @@ def visualize_dataset(
             # display each dimension of action space (e.g. actuators command)
             if ACTION in batch:
                 for dim_idx, val in enumerate(batch[ACTION][i]):
-                    rr.log(f"{ACTION}/{dim_idx}", rr.Scalars(val.item()))
+                    action_name = (
+                        action_feature_names[dim_idx]
+                        if dim_idx < len(action_feature_names)
+                        else str(dim_idx)
+                    )
+                    rr.log(f"{ACTION}/{action_name}", rr.Scalars(val.item()))
 
             # display each dimension of observed state space (e.g. agent position in joint space)
             if OBS_STATE in batch:
                 for dim_idx, val in enumerate(batch[OBS_STATE][i]):
-                    rr.log(f"state/{dim_idx}", rr.Scalars(val.item()))
+                    obs_state_name = (
+                        obs_state_feature_names[dim_idx]
+                        if dim_idx < len(obs_state_feature_names)
+                        else str(dim_idx)
+                    )
+                    rr.log(f"state/{obs_state_name}", rr.Scalars(val.item()))
 
             if DONE in batch:
                 rr.log(DONE, rr.Scalars(batch[DONE][i].item()))
