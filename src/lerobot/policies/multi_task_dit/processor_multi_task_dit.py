@@ -20,11 +20,13 @@ import torch
 
 from lerobot.policies.multi_task_dit.configuration_multi_task_dit import MultiTaskDiTConfig
 from lerobot.processor import (
+    AbsoluteActionsProcessorStep,
     AddBatchDimensionProcessorStep,
     DeviceProcessorStep,
     NormalizerProcessorStep,
     PolicyAction,
     PolicyProcessorPipeline,
+    RelativeActionsProcessorStep,
     RenameObservationsProcessorStep,
     TokenizerProcessorStep,
     UnnormalizerProcessorStep,
@@ -63,10 +65,16 @@ def make_multi_task_dit_pre_post_processors(
     Returns:
         A tuple containing the configured pre-processor and post-processor pipelines.
     """
+    relative_step = RelativeActionsProcessorStep(
+        enabled=config.use_relative_actions,
+        exclude_joints=getattr(config, "relative_exclude_joints", []),
+        action_names=getattr(config, "action_feature_names", None),
+    )
 
     input_steps = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
+        relative_step,
         TokenizerProcessorStep(
             tokenizer_name=config.text_encoder_name,
             padding=config.tokenizer_padding,
@@ -89,6 +97,7 @@ def make_multi_task_dit_pre_post_processors(
             norm_map=config.normalization_mapping,
             stats=dataset_stats,
         ),
+        AbsoluteActionsProcessorStep(enabled=config.use_relative_actions, relative_step=relative_step),
         DeviceProcessorStep(device="cpu"),
     ]
 

@@ -59,6 +59,12 @@ class MultiTaskDiTConfig(PreTrainedConfig):
     timestep_sampling_s: float = 0.999  # (beta only) Max timestep threshold
     timestep_sampling_alpha: float = 1.5  # (beta only) Beta distribution alpha
     timestep_sampling_beta: float = 1.0  # (beta only) Beta distribution beta
+    # Relative actions: converts absolute actions to relative (relative to state).
+    use_relative_actions: bool = False
+    # Joint names to exclude from relative (kept absolute). Empty list = all dims relative.
+    relative_exclude_joints: list[str] = field(default_factory=lambda: ["gripper"])
+    # Populated at runtime from dataset metadata by make_policy.
+    action_feature_names: list[str] | None = None
 
     # Transformer Architecture
     hidden_dim: int = 512  # Transformer hidden dimension

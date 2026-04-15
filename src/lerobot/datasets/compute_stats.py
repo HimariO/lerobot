@@ -730,6 +730,7 @@ def compute_relative_action_stats(
     relative_mask_bool = mask_step._build_mask(action_dim)
     relative_mask = np.array(relative_mask_bool, dtype=np.float32)
     pose_specs = mask_step._build_pose_specs(action_dim)
+    print(f"{pose_specs=}")
 
     logging.info("Loading action/state data for relative action stats...")
     all_actions = np.array(hf_dataset[ACTION], dtype=np.float32)

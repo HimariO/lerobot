@@ -1586,7 +1586,7 @@ def recompute_stats(
     relative_action_stats = None
     if relative_action and ACTION in features and OBS_STATE in features:
         if relative_exclude_joints is None:
-            relative_exclude_joints = ["gripper"]
+            relative_exclude_joints = []
         relative_action_stats = compute_relative_action_stats(
             hf_dataset=dataset.hf_dataset,
             features=features,

@@ -320,6 +320,49 @@ def test_multi_task_dit_pre_post_processors_normalization():
     assert torch.allclose(unnormalized_action[0], input_action, atol=1e-4)
 
 
+def test_multi_task_dit_pre_post_processors_relative_actions():
+    """Test that relative actions are applied in preprocessing and restored in postprocessing."""
+    state_dim = 4
+    action_dim = 4
+
+    config = create_config(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        n_obs_steps=2,
+        horizon=16,
+        n_action_steps=8,
+    )
+    config.device = "cpu"
+    config.use_relative_actions = True
+    config.relative_exclude_joints = ["gripper"]
+    config.action_feature_names = ["joint_1", "joint_2", "joint_3", "gripper"]
+    config.normalization_mapping = {
+        "VISUAL": NormalizationMode.IDENTITY,
+        "STATE": NormalizationMode.IDENTITY,
+        "ACTION": NormalizationMode.IDENTITY,
+    }
+
+    preprocessor, postprocessor = make_multi_task_dit_pre_post_processors(config=config, dataset_stats=None)
+
+    input_state = torch.tensor([1.0, 2.0, 3.0, 0.2])
+    input_action = torch.tensor([3.0, 6.0, 9.0, 0.7])
+
+    batch = {
+        OBS_STATE: input_state,
+        f"{OBS_IMAGES}.laptop": torch.rand(3, 224, 224),
+        ACTION: input_action,
+        "task": "relative action test",
+    }
+
+    processed_batch = preprocessor(batch)
+
+    expected_relative_action = torch.tensor([2.0, 4.0, 6.0, 0.7])
+    assert torch.allclose(processed_batch[ACTION][0], expected_relative_action, atol=1e-5)
+
+    restored_action = postprocessor(processed_batch[ACTION][0:1])
+    assert torch.allclose(restored_action[0], input_action, atol=1e-5)
+
+
 @pytest.mark.parametrize("batch_size,state_dim,action_dim", [(2, 10, 10), (1, 6, 6)])
 def test_multi_task_dit_policy_select_action(batch_size: int, state_dim: int, action_dim: int):
     """Test select_action (inference mode)."""
