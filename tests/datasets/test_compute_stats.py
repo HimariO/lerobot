@@ -23,13 +23,14 @@ from lerobot.datasets.compute_stats import (
     _assert_type_and_shape,
     aggregate_feature_stats,
     aggregate_stats,
+    compute_relative_action_stats,
     compute_episode_stats,
     estimate_num_samples,
     get_feature_stats,
     sample_images,
     sample_indices,
 )
-from lerobot.utils.constants import OBS_IMAGE, OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_IMAGE, OBS_STATE
 
 
 def mock_load_image_as_numpy(path, dtype, channel_first):
@@ -832,3 +833,56 @@ def test_fixed_quantiles_always_computed():
         for q_key in expected_quantiles:
             assert q_key in episode_stats[key]
             assert episode_stats[key][q_key].shape == (features[key]["shape"][0],)
+
+
+def test_compute_relative_action_stats_supports_pose_wxyz():
+    half_sqrt2 = np.sqrt(0.5, dtype=np.float32)
+
+    # Two-frame single-episode chunk.
+    # Frame 0 is identical to state => identity relative pose.
+    # Frame 1 rotates +90° around z wrt state and translates +x in world frame.
+    # With pose-aware conversion, that translation becomes -y in the state-local frame.
+    hf_dataset = {
+        ACTION: np.array(
+            [
+                [1.0, 2.0, 0.0, half_sqrt2, 0.0, 0.0, half_sqrt2],
+                [2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        ),
+        OBS_STATE: np.array(
+            [
+                [1.0, 2.0, 0.0, half_sqrt2, 0.0, 0.0, half_sqrt2],
+                [1.0, 2.0, 0.0, half_sqrt2, 0.0, 0.0, half_sqrt2],
+            ],
+            dtype=np.float32,
+        ),
+        "episode_index": np.array([0, 0], dtype=np.int64),
+    }
+
+    features = {
+        ACTION: {
+            "shape": (7,),
+            "names": [
+                "ee.pos.x",
+                "ee.pos.y",
+                "ee.pos.z",
+                "ee.quat.w",
+                "ee.quat.x",
+                "ee.quat.y",
+                "ee.quat.z",
+            ],
+        }
+    }
+
+    stats = compute_relative_action_stats(
+        hf_dataset=hf_dataset,
+        features=features,
+        chunk_size=2,
+        exclude_joints=[],
+        num_workers=0,
+    )
+
+    # Pose-aware translation should be local-frame: [0, -1, 0] on frame 1.
+    # Mean over two frames => [0, -0.5, 0].
+    np.testing.assert_allclose(stats["mean"][:3], np.array([0.0, -0.5, 0.0], dtype=np.float32), atol=1e-5)

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -34,7 +35,73 @@ __all__ = [
     "AbsoluteActionsProcessorStep",
     "to_relative_actions",
     "to_absolute_actions",
+    "to_relative_actions_with_pose_specs",
+    "to_absolute_actions_with_pose_specs",
 ]
+
+
+@dataclass(frozen=True)
+class _PoseActionSpec:
+    position_indices: tuple[int, int, int]
+    quaternion_indices: tuple[int, int, int, int]
+
+
+_QUATERNION_COMPONENT_PATTERNS = (
+    re.compile(r"^(?P<prefix>.*?)(?:\.)?(?:quat|quaternion|orientation)\.(?P<component>[wxyz])$"),
+    re.compile(r"^(?P<prefix>.*?)(?P<component>[wxyz])\.(?:quat|quaternion|orientation)$"),
+    re.compile(r"^(?P<prefix>.*?)(?:\.)?q(?P<component>[wxyz])$"),
+)
+_POSITION_COMPONENT_PATTERNS = (
+    re.compile(r"^(?P<prefix>.*?)(?:\.)?(?:pos|position)\.(?P<component>[xyz])$"),
+    re.compile(r"^(?P<prefix>.*?)(?P<component>[xyz])\.(?:pos|position)$"),
+)
+_AXIS_COMPONENT_PATTERNS = (
+    re.compile(r"^(?P<prefix>.+)\.(?P<component>[xyz])$"),
+    re.compile(r"^(?P<component>[xyz])$"),
+)
+
+
+def _extract_component(name: str, patterns: Sequence[re.Pattern[str]]) -> tuple[str, str] | None:
+    normalized_name = re.sub(r"[/_]", ".", name.lower())
+    for pattern in patterns:
+        match = pattern.match(normalized_name)
+        if match is None:
+            continue
+        prefix = match.groupdict().get("prefix", "").strip(".")
+        component = match.group("component")
+        return prefix, component
+    return None
+
+
+def _normalize_quaternion_wxyz(quaternion: Tensor, eps: float = 1e-8) -> Tensor:
+    return quaternion / quaternion.norm(dim=-1, keepdim=True).clamp_min(eps)
+
+
+def _quat_conjugate_wxyz(quaternion: Tensor) -> Tensor:
+    conjugate = quaternion.clone()
+    conjugate[..., 1:] = -conjugate[..., 1:]
+    return conjugate
+
+
+def _quat_multiply_wxyz(lhs: Tensor, rhs: Tensor) -> Tensor:
+    lw, lx, ly, lz = lhs.unbind(dim=-1)
+    rw, rx, ry, rz = rhs.unbind(dim=-1)
+    return torch.stack(
+        (
+            lw * rw - lx * rx - ly * ry - lz * rz,
+            lw * rx + lx * rw + ly * rz - lz * ry,
+            lw * ry - lx * rz + ly * rw + lz * rx,
+            lw * rz + lx * ry - ly * rx + lz * rw,
+        ),
+        dim=-1,
+    )
+
+
+def _quat_apply_wxyz(quaternion: Tensor, vectors: Tensor) -> Tensor:
+    q_xyz = quaternion[..., 1:]
+    q_w = quaternion[..., :1]
+    t = 2.0 * torch.linalg.cross(q_xyz, vectors, dim=-1)
+    return vectors + q_w * t + torch.linalg.cross(q_xyz, t, dim=-1)
 
 
 def to_relative_actions(actions: Tensor, state: Tensor, mask: Sequence[bool]) -> Tensor:
@@ -81,6 +148,102 @@ def to_absolute_actions(actions: Tensor, state: Tensor, mask: Sequence[bool]) ->
     return actions
 
 
+def to_relative_actions_with_pose_specs(
+    actions: Tensor,
+    state: Tensor,
+    mask: Sequence[bool],
+    pose_specs: Sequence[_PoseActionSpec],
+) -> Tensor:
+    if not pose_specs:
+        return to_relative_actions(actions, state, mask)
+
+    if state.device != actions.device or state.dtype != actions.dtype:
+        state = state.to(device=actions.device, dtype=actions.dtype)
+
+    absolute_actions = actions
+    relative_actions = to_relative_actions(actions, state, mask)
+
+    mask_t = torch.as_tensor(mask, dtype=torch.bool, device=actions.device)
+    dims = mask_t.shape[0]
+    state_dim = state.shape[-1]
+    mask_list = mask_t.tolist()
+
+    for spec in pose_specs:
+        pose_indices = spec.position_indices + spec.quaternion_indices
+        if any(index >= dims or index >= state_dim for index in pose_indices):
+            continue
+        if not all(mask_list[index] for index in spec.quaternion_indices):
+            continue
+
+        state_quat = _normalize_quaternion_wxyz(state[..., list(spec.quaternion_indices)])
+        action_quat = _normalize_quaternion_wxyz(absolute_actions[..., list(spec.quaternion_indices)])
+        if relative_actions.ndim == 3:
+            state_quat = state_quat.unsqueeze(-2)
+
+        # q and -q encode the same orientation. Align to avoid discontinuous jumps.
+        dot = (action_quat * state_quat).sum(dim=-1, keepdim=True)
+        action_quat = torch.where(dot < 0.0, -action_quat, action_quat)
+
+        relative_quat = _quat_multiply_wxyz(_quat_conjugate_wxyz(state_quat), action_quat)
+        relative_actions[..., list(spec.quaternion_indices)] = _normalize_quaternion_wxyz(relative_quat)
+
+        if all(mask_list[index] for index in spec.position_indices):
+            state_pos = state[..., list(spec.position_indices)]
+            action_pos = absolute_actions[..., list(spec.position_indices)]
+            if relative_actions.ndim == 3:
+                state_pos = state_pos.unsqueeze(-2)
+            relative_pos = _quat_apply_wxyz(_quat_conjugate_wxyz(state_quat), action_pos - state_pos)
+            relative_actions[..., list(spec.position_indices)] = relative_pos
+
+    return relative_actions
+
+
+def to_absolute_actions_with_pose_specs(
+    actions: Tensor,
+    state: Tensor,
+    mask: Sequence[bool],
+    pose_specs: Sequence[_PoseActionSpec],
+) -> Tensor:
+    if not pose_specs:
+        return to_absolute_actions(actions, state, mask)
+
+    if state.device != actions.device or state.dtype != actions.dtype:
+        state = state.to(device=actions.device, dtype=actions.dtype)
+
+    relative_actions = actions
+    absolute_actions = to_absolute_actions(actions, state, mask)
+
+    mask_t = torch.as_tensor(mask, dtype=torch.bool, device=actions.device)
+    dims = mask_t.shape[0]
+    state_dim = state.shape[-1]
+    mask_list = mask_t.tolist()
+
+    for spec in pose_specs:
+        pose_indices = spec.position_indices + spec.quaternion_indices
+        if any(index >= dims or index >= state_dim for index in pose_indices):
+            continue
+        if not all(mask_list[index] for index in spec.quaternion_indices):
+            continue
+
+        state_quat = _normalize_quaternion_wxyz(state[..., list(spec.quaternion_indices)])
+        relative_quat = _normalize_quaternion_wxyz(relative_actions[..., list(spec.quaternion_indices)])
+        if absolute_actions.ndim == 3:
+            state_quat = state_quat.unsqueeze(-2)
+
+        absolute_quat = _quat_multiply_wxyz(state_quat, relative_quat)
+        absolute_actions[..., list(spec.quaternion_indices)] = _normalize_quaternion_wxyz(absolute_quat)
+
+        if all(mask_list[index] for index in spec.position_indices):
+            state_pos = state[..., list(spec.position_indices)]
+            relative_pos = relative_actions[..., list(spec.position_indices)]
+            if absolute_actions.ndim == 3:
+                state_pos = state_pos.unsqueeze(-2)
+            absolute_pos = state_pos + _quat_apply_wxyz(state_quat, relative_pos)
+            absolute_actions[..., list(spec.position_indices)] = absolute_pos
+
+    return absolute_actions
+
+
 @ProcessorStepRegistry.register("delta_actions_processor")
 @dataclass
 class RelativeActionsProcessorStep(ProcessorStep):
@@ -122,6 +285,60 @@ class RelativeActionsProcessorStep(ProcessorStep):
 
         return mask
 
+    def _build_pose_specs(self, action_dim: int) -> list[_PoseActionSpec]:
+        if self.action_names is None:
+            return []
+
+        action_names = [str(name) for name in self.action_names[:action_dim]]
+        quat_components_by_prefix: dict[str, dict[str, int]] = {}
+        pos_components_by_prefix: dict[str, dict[str, int]] = {}
+
+        for index, action_name in enumerate(action_names):
+            quat_component = _extract_component(action_name, _QUATERNION_COMPONENT_PATTERNS)
+            if quat_component is not None:
+                prefix, component = quat_component
+                quat_components_by_prefix.setdefault(prefix, {})[component] = index
+                continue
+
+            pos_component = _extract_component(action_name, _POSITION_COMPONENT_PATTERNS)
+            if pos_component is not None:
+                prefix, component = pos_component
+                pos_components_by_prefix.setdefault(prefix, {})[component] = index
+
+        # Fallback for common "<prefix>.x/y/z" position naming.
+        if quat_components_by_prefix:
+            for index, action_name in enumerate(action_names):
+                axis_component = _extract_component(action_name, _AXIS_COMPONENT_PATTERNS)
+                if axis_component is None:
+                    continue
+                prefix, component = axis_component
+                if prefix not in quat_components_by_prefix:
+                    continue
+                pos_components_by_prefix.setdefault(prefix, {}).setdefault(component, index)
+
+        pose_specs = []
+        for prefix, quat_components in quat_components_by_prefix.items():
+            if not {"w", "x", "y", "z"}.issubset(quat_components):
+                continue
+            pos_components = pos_components_by_prefix.get(prefix, {})
+            if not {"x", "y", "z"}.issubset(pos_components):
+                continue
+            pose_specs.append(
+                _PoseActionSpec(
+                    position_indices=(pos_components["x"], pos_components["y"], pos_components["z"]),
+                    quaternion_indices=(
+                        quat_components["w"],
+                        quat_components["x"],
+                        quat_components["y"],
+                        quat_components["z"],
+                    ),
+                )
+            )
+            print(" [_PoseActionSpec] ", pose_specs[-1])
+
+        pose_specs.sort(key=lambda spec: min(spec.position_indices + spec.quaternion_indices))
+        return pose_specs
+
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         observation = transition.get(TransitionKey.OBSERVATION, {})
         state = observation.get(OBS_STATE) if observation else None
@@ -139,7 +356,13 @@ class RelativeActionsProcessorStep(ProcessorStep):
             return new_transition
 
         mask = self._build_mask(action.shape[-1])
-        new_transition[TransitionKey.ACTION] = to_relative_actions(action, state, mask)
+        pose_specs = self._build_pose_specs(action.shape[-1])
+        if pose_specs:
+            new_transition[TransitionKey.ACTION] = to_relative_actions_with_pose_specs(
+                action, state, mask, pose_specs
+            )
+        else:
+            new_transition[TransitionKey.ACTION] = to_relative_actions(action, state, mask)
         return new_transition
 
     def get_config(self) -> dict[str, Any]:
@@ -194,9 +417,15 @@ class AbsoluteActionsProcessorStep(ProcessorStep):
             return new_transition
 
         mask = self.relative_step._build_mask(action.shape[-1])
-        new_transition[TransitionKey.ACTION] = to_absolute_actions(
-            action, self.relative_step._last_state, mask
-        )
+        pose_specs = self.relative_step._build_pose_specs(action.shape[-1])
+        if pose_specs:
+            new_transition[TransitionKey.ACTION] = to_absolute_actions_with_pose_specs(
+                action, self.relative_step._last_state, mask, pose_specs
+            )
+        else:
+            new_transition[TransitionKey.ACTION] = to_absolute_actions(
+                action, self.relative_step._last_state, mask
+            )
         return new_transition
 
     def get_config(self) -> dict[str, Any]:

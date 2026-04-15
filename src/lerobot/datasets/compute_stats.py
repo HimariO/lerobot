@@ -16,8 +16,11 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
+import torch
 
 from lerobot.datasets.io_utils import load_image_as_numpy
 from lerobot.utils.constants import ACTION, OBS_STATE
@@ -648,6 +651,8 @@ def _compute_relative_chunk_batch(
     all_states: np.ndarray,
     chunk_size: int,
     relative_mask: np.ndarray,
+    relative_mask_bool: Sequence[bool] | None = None,
+    pose_specs: Sequence[Any] | None = None,
 ) -> np.ndarray:
     """Vectorised relative-action computation for a batch of start indices.
 
@@ -660,8 +665,22 @@ def _compute_relative_chunk_batch(
     chunks = all_actions[frame_idx].copy()
     states = all_states[start_indices]
     mask_dim = len(relative_mask)
-    chunks[:, :, :mask_dim] -= states[:, None, :mask_dim] * relative_mask[None, None, :]
-    return chunks.reshape(-1, all_actions.shape[1])
+    if not pose_specs:
+        chunks[:, :, :mask_dim] -= states[:, None, :mask_dim] * relative_mask[None, None, :]
+        return chunks.reshape(-1, all_actions.shape[1])
+
+    from lerobot.processor.relative_action_processor import to_relative_actions_with_pose_specs
+
+    if relative_mask_bool is None:
+        relative_mask_bool = relative_mask.astype(bool).tolist()
+
+    relative_chunks = to_relative_actions_with_pose_specs(
+        torch.from_numpy(chunks),
+        torch.from_numpy(states),
+        relative_mask_bool,
+        pose_specs,
+    )
+    return relative_chunks.reshape(-1, all_actions.shape[1]).numpy()
 
 
 def compute_relative_action_stats(
@@ -708,7 +727,9 @@ def compute_relative_action_stats(
         exclude_joints=exclude_joints,
         action_names=action_names,
     )
-    relative_mask = np.array(mask_step._build_mask(action_dim), dtype=np.float32)
+    relative_mask_bool = mask_step._build_mask(action_dim)
+    relative_mask = np.array(relative_mask_bool, dtype=np.float32)
+    pose_specs = mask_step._build_pose_specs(action_dim)
 
     logging.info("Loading action/state data for relative action stats...")
     all_actions = np.array(hf_dataset[ACTION], dtype=np.float32)
@@ -744,6 +765,8 @@ def compute_relative_action_stats(
                     all_states,
                     chunk_size,
                     relative_mask,
+                    relative_mask_bool,
+                    pose_specs,
                 )
                 for batch in batches
             ]
@@ -752,7 +775,15 @@ def compute_relative_action_stats(
     else:
         for batch in batches:
             running_stats.update(
-                _compute_relative_chunk_batch(batch, all_actions, all_states, chunk_size, relative_mask)
+                _compute_relative_chunk_batch(
+                    batch,
+                    all_actions,
+                    all_states,
+                    chunk_size,
+                    relative_mask,
+                    relative_mask_bool,
+                    pose_specs,
+                )
             )
 
     stats = running_stats.get_statistics()

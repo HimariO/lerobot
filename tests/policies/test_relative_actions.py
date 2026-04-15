@@ -5,6 +5,7 @@ Tests the complete flow matching OpenPI:
 
 Uses real dataset: lerobot-data-collection/dagger_final_1_21
 """
+import math
 
 import numpy as np
 import pytest
@@ -101,6 +102,81 @@ def test_exclude_joints_supports_partial_name_matching():
     ]
     step = RelativeActionsProcessorStep(enabled=True, exclude_joints=["gripper"], action_names=names)
     assert step._build_mask(len(names)) == [True, False, True, False]
+
+
+def _assert_quaternion_equivalent(actual: torch.Tensor, expected: torch.Tensor, atol: float = 1e-5) -> None:
+    actual = actual / actual.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+    expected = expected / expected.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+    direct = (actual - expected).norm(dim=-1)
+    opposite = (actual + expected).norm(dim=-1)
+    assert torch.all(torch.minimum(direct, opposite) <= atol), (
+        f"Quaternion mismatch (up to sign). max direct={direct.max().item():.3e}, "
+        f"max opposite={opposite.max().item():.3e}"
+    )
+
+
+def test_pose_wxyz_roundtrip_uses_pose_relative_math():
+    # names = [
+    #     "ee.pos.x",
+    #     "ee.pos.y",
+    #     "ee.pos.z",
+    #     "ee.quat.w",
+    #     "ee.quat.x",
+    #     "ee.quat.y",
+    #     "ee.quat.z",
+    # ]
+    names = [
+        "tcp_pose.position.x",
+        "tcp_pose.position.y",
+        "tcp_pose.position.z",
+        "tcp_pose.orientation.x",
+        "tcp_pose.orientation.y",
+        "tcp_pose.orientation.z",
+        "tcp_pose.orientation.w",
+    ]
+    relative_step = RelativeActionsProcessorStep(enabled=True, action_names=names)
+    absolute_step = AbsoluteActionsProcessorStep(enabled=True, relative_step=relative_step)
+
+    half_sqrt2 = math.sqrt(0.5)
+    # state = torch.tensor([[1.0, 2.0, 0.0, half_sqrt2, 0.0, 0.0, half_sqrt2]], dtype=torch.float32)
+    # action = torch.tensor([[2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0]], dtype=torch.float32)
+    state = torch.tensor([[1.0, 2.0, 0.0, 0.0, 0.0, half_sqrt2, half_sqrt2]], dtype=torch.float32)
+    action = torch.tensor([[2.0, 2.0, 0.0, 0.0, 0.0, 1.0, 0.0]], dtype=torch.float32)
+    transition = batch_to_transition({ACTION: action, OBS_STATE: state})
+
+    relative_transition = relative_step(transition)
+    relative_action = relative_transition[TransitionKey.ACTION]
+
+    # expected_relative = torch.tensor([[0.0, -1.0, 0.0, half_sqrt2, 0.0, 0.0, half_sqrt2]])
+    expected_relative = torch.tensor([[0.0, -1.0, 0.0, 0.0, 0.0, half_sqrt2, half_sqrt2]])
+    torch.testing.assert_close(relative_action[..., :3], expected_relative[..., :3], atol=1e-5, rtol=1e-5)
+    _assert_quaternion_equivalent(relative_action[..., 3:7], expected_relative[..., 3:7], atol=1e-5)
+
+    recovered = absolute_step({TransitionKey.ACTION: relative_action})[TransitionKey.ACTION]
+    torch.testing.assert_close(recovered[..., :3], action[..., :3], atol=1e-5, rtol=1e-5)
+    _assert_quaternion_equivalent(recovered[..., 3:7], action[..., 3:7], atol=1e-5)
+
+
+def test_pose_relative_handles_quaternion_sign_ambiguity():
+    names = [
+        "ee.pos.x",
+        "ee.pos.y",
+        "ee.pos.z",
+        "ee.quat.w",
+        "ee.quat.x",
+        "ee.quat.y",
+        "ee.quat.z",
+    ]
+    relative_step = RelativeActionsProcessorStep(enabled=True, action_names=names)
+
+    quat = torch.tensor([math.sqrt(0.5), 0.0, 0.0, math.sqrt(0.5)], dtype=torch.float32)
+    state = torch.tensor([[0.0, 0.0, 0.0, *quat.tolist()]], dtype=torch.float32)
+    # Same physical orientation as state, but with opposite quaternion sign.
+    action = torch.tensor([[0.0, 0.0, 0.0, *(-quat).tolist()]], dtype=torch.float32)
+
+    relative_action = relative_step(batch_to_transition({ACTION: action, OBS_STATE: state}))[TransitionKey.ACTION]
+    expected_identity_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    _assert_quaternion_equivalent(relative_action[..., 3:7], expected_identity_quat, atol=1e-5)
 
 
 # Chunk-level relative stats test
