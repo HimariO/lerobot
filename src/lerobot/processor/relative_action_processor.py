@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from opcode import stack_effect
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -119,8 +120,16 @@ def to_relative_actions(actions: Tensor, state: Tensor, mask: Sequence[bool]) ->
     if state.device != actions.device or state.dtype != actions.dtype:
         state = state.to(device=actions.device, dtype=actions.dtype)
     state_offset = state[..., :dims] * mask_t
+    
     if actions.ndim == 3:
-        state_offset = state_offset.unsqueeze(-2)
+        if state_offset.ndim == 3:
+            # (batch, n_obs, obs_dim) state, use by policy with `n_obs_steps` > 1
+            state_offset = state_offset[:, -1:, :]
+        elif state_offset.ndim == 2:
+            state_offset = state_offset.unsqueeze(-2)
+        else:
+            raise ValueError(f"Unsupported state shape: {state_offset.shape}")
+    
     actions = actions.clone()
     actions[..., :dims] -= state_offset
     return actions
@@ -141,8 +150,16 @@ def to_absolute_actions(actions: Tensor, state: Tensor, mask: Sequence[bool]) ->
     if state.device != actions.device or state.dtype != actions.dtype:
         state = state.to(device=actions.device, dtype=actions.dtype)
     state_offset = state[..., :dims] * mask_t
+    
     if actions.ndim == 3:
-        state_offset = state_offset.unsqueeze(-2)
+        if state_offset.ndim == 3:
+            # (batch, n_obs, obs_dim) state, use by policy with `n_obs_steps` > 1
+            state_offset = state_offset[:, -1:, :]
+        elif state_offset.ndim == 2:
+            state_offset = state_offset.unsqueeze(-2)
+        else:
+            raise ValueError(f"Unsupported state shape: {state_offset.shape}")
+    
     actions = actions.clone()
     actions[..., :dims] += state_offset
     return actions
@@ -162,6 +179,10 @@ def to_relative_actions_with_pose_specs(
 
     absolute_actions = actions
     relative_actions = to_relative_actions(actions, state, mask)
+
+    if state.ndim == 3:
+        # use last observation as reference point
+        state = state[:, -1, :]
 
     mask_t = torch.as_tensor(mask, dtype=torch.bool, device=actions.device)
     dims = mask_t.shape[0]
@@ -212,6 +233,10 @@ def to_absolute_actions_with_pose_specs(
 
     relative_actions = actions
     absolute_actions = to_absolute_actions(actions, state, mask)
+    
+    if state.ndim == 3:
+        # use last observation as reference point
+        state = state[:, -1, :]
 
     mask_t = torch.as_tensor(mask, dtype=torch.bool, device=actions.device)
     dims = mask_t.shape[0]
@@ -334,7 +359,7 @@ class RelativeActionsProcessorStep(ProcessorStep):
                     ),
                 )
             )
-            print(" [_PoseActionSpec] ", pose_specs[-1])
+            # print(" [_PoseActionSpec] ", pose_specs[-1])
 
         pose_specs.sort(key=lambda spec: min(spec.position_indices + spec.quaternion_indices))
         return pose_specs
