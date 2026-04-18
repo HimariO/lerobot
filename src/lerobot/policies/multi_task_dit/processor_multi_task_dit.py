@@ -237,6 +237,7 @@ def make_multi_task_dit_pre_post_processors(
         enabled=config.use_relative_actions,
         exclude_joints=getattr(config, "relative_exclude_joints", []),
         action_names=getattr(config, "action_feature_names", None),
+        convert_relative_quat_to_rotvec=True,
     )
     if not config.text_embed_table:
         task_tokenize = TokenizerProcessorStep(

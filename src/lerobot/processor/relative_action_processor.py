@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from opcode import stack_effect
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -105,6 +104,30 @@ def _quat_apply_wxyz(quaternion: Tensor, vectors: Tensor) -> Tensor:
     return vectors + q_w * t + torch.linalg.cross(q_xyz, t, dim=-1)
 
 
+def _quat_wxyz_to_rotvec(quaternion: Tensor, eps: float = 1e-8) -> Tensor:
+    quaternion = _normalize_quaternion_wxyz(quaternion, eps=eps)
+    # q and -q encode the same orientation. Use the shortest representation.
+    quaternion = torch.where(quaternion[..., :1] < 0.0, -quaternion, quaternion)
+    q_w = quaternion[..., :1].clamp(-1.0, 1.0)
+    q_xyz = quaternion[..., 1:]
+    sin_half = q_xyz.norm(dim=-1, keepdim=True)
+    angle = 2.0 * torch.atan2(sin_half, q_w)
+    scale = torch.where(sin_half > eps, angle / sin_half, torch.full_like(sin_half, 2.0))
+    return q_xyz * scale
+
+
+def _rotvec_to_quat_wxyz(rotvec: Tensor, eps: float = 1e-8) -> Tensor:
+    angle = rotvec.norm(dim=-1, keepdim=True)
+    half_angle = 0.5 * angle
+    sin_half = torch.sin(half_angle)
+    # Stable near zero: sin(a/2)/a -> 0.5, cos(a/2) -> 1.
+    scale = torch.where(angle > eps, sin_half / angle, 0.5 - (angle * angle) / 48.0)
+    q_xyz = rotvec * scale
+    q_w = torch.where(angle > eps, torch.cos(half_angle), 1.0 - (angle * angle) / 8.0)
+    quaternion = torch.cat((q_w, q_xyz), dim=-1)
+    return _normalize_quaternion_wxyz(quaternion, eps=eps)
+
+
 def to_relative_actions(actions: Tensor, state: Tensor, mask: Sequence[bool]) -> Tensor:
     """Convert absolute actions to relative: relative = action - state (for masked dims).
 
@@ -170,6 +193,7 @@ def to_relative_actions_with_pose_specs(
     state: Tensor,
     mask: Sequence[bool],
     pose_specs: Sequence[_PoseActionSpec],
+    convert_relative_quat_to_rotvec: bool = False,
 ) -> Tensor:
     if not pose_specs:
         return to_relative_actions(actions, state, mask)
@@ -206,7 +230,13 @@ def to_relative_actions_with_pose_specs(
         action_quat = torch.where(dot < 0.0, -action_quat, action_quat)
 
         relative_quat = _quat_multiply_wxyz(_quat_conjugate_wxyz(state_quat), action_quat)
-        relative_actions[..., list(spec.quaternion_indices)] = _normalize_quaternion_wxyz(relative_quat)
+        if convert_relative_quat_to_rotvec:
+            w_idx, x_idx, y_idx, z_idx = spec.quaternion_indices
+            relative_rotvec = _quat_wxyz_to_rotvec(relative_quat)
+            relative_actions[..., [x_idx, y_idx, z_idx]] = relative_rotvec
+            relative_actions[..., w_idx] = 0.0
+        else:
+            relative_actions[..., list(spec.quaternion_indices)] = _normalize_quaternion_wxyz(relative_quat)
 
         if all(mask_list[index] for index in spec.position_indices):
             state_pos = state[..., list(spec.position_indices)]
@@ -224,6 +254,7 @@ def to_absolute_actions_with_pose_specs(
     state: Tensor,
     mask: Sequence[bool],
     pose_specs: Sequence[_PoseActionSpec],
+    convert_relative_quat_to_rotvec: bool = False,
 ) -> Tensor:
     if not pose_specs:
         return to_absolute_actions(actions, state, mask)
@@ -251,7 +282,12 @@ def to_absolute_actions_with_pose_specs(
             continue
 
         state_quat = _normalize_quaternion_wxyz(state[..., list(spec.quaternion_indices)])
-        relative_quat = _normalize_quaternion_wxyz(relative_actions[..., list(spec.quaternion_indices)])
+        if convert_relative_quat_to_rotvec:
+            _, x_idx, y_idx, z_idx = spec.quaternion_indices
+            relative_rotvec = relative_actions[..., [x_idx, y_idx, z_idx]]
+            relative_quat = _rotvec_to_quat_wxyz(relative_rotvec)
+        else:
+            relative_quat = _normalize_quaternion_wxyz(relative_actions[..., list(spec.quaternion_indices)])
         if absolute_actions.ndim == 3:
             state_quat = state_quat.unsqueeze(-2)
 
@@ -284,11 +320,15 @@ class RelativeActionsProcessorStep(ProcessorStep):
         exclude_joints: Joint names to keep absolute (not converted to relative).
         action_names: Action dimension names from dataset metadata, used to build
             the mask from exclude_joints. If None, all dims are converted.
+        convert_relative_quat_to_rotvec: If True, pose-relative quaternion deltas are
+            encoded as rotation vectors in the x/y/z quaternion component slots and the
+            w slot is set to 0. Post-processing then decodes x/y/z back to a quaternion.
     """
 
     enabled: bool = False
     exclude_joints: list[str] = field(default_factory=list)
     action_names: list[str] | None = None
+    convert_relative_quat_to_rotvec: bool = False
     _last_state: torch.Tensor | None = field(default=None, init=False, repr=False)
 
     def _build_mask(self, action_dim: int) -> list[bool]:
@@ -384,7 +424,11 @@ class RelativeActionsProcessorStep(ProcessorStep):
         pose_specs = self._build_pose_specs(action.shape[-1])
         if pose_specs:
             new_transition[TransitionKey.ACTION] = to_relative_actions_with_pose_specs(
-                action, state, mask, pose_specs
+                action,
+                state,
+                mask,
+                pose_specs,
+                convert_relative_quat_to_rotvec=self.convert_relative_quat_to_rotvec,
             )
         else:
             new_transition[TransitionKey.ACTION] = to_relative_actions(action, state, mask)
@@ -395,6 +439,7 @@ class RelativeActionsProcessorStep(ProcessorStep):
             "enabled": self.enabled,
             "exclude_joints": self.exclude_joints,
             "action_names": self.action_names,
+            "convert_relative_quat_to_rotvec": self.convert_relative_quat_to_rotvec,
         }
 
     def transform_features(
@@ -445,7 +490,11 @@ class AbsoluteActionsProcessorStep(ProcessorStep):
         pose_specs = self.relative_step._build_pose_specs(action.shape[-1])
         if pose_specs:
             new_transition[TransitionKey.ACTION] = to_absolute_actions_with_pose_specs(
-                action, self.relative_step._last_state, mask, pose_specs
+                action,
+                self.relative_step._last_state,
+                mask,
+                pose_specs,
+                convert_relative_quat_to_rotvec=self.relative_step.convert_relative_quat_to_rotvec,
             )
         else:
             new_transition[TransitionKey.ACTION] = to_absolute_actions(

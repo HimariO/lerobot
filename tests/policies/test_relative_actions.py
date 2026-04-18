@@ -179,6 +179,69 @@ def test_pose_relative_handles_quaternion_sign_ambiguity():
     _assert_quaternion_equivalent(relative_action[..., 3:7], expected_identity_quat, atol=1e-5)
 
 
+def test_pose_relative_rotvec_mode_outputs_radians_and_roundtrips():
+    names = [
+        "tcp_pose.position.x",
+        "tcp_pose.position.y",
+        "tcp_pose.position.z",
+        "tcp_pose.orientation.x",
+        "tcp_pose.orientation.y",
+        "tcp_pose.orientation.z",
+        "tcp_pose.orientation.w",
+    ]
+    relative_step = RelativeActionsProcessorStep(
+        enabled=True,
+        action_names=names,
+        convert_relative_quat_to_rotvec=True,
+    )
+    absolute_step = AbsoluteActionsProcessorStep(enabled=True, relative_step=relative_step)
+
+    half_sqrt2 = math.sqrt(0.5)
+    state = torch.tensor([[1.0, 2.0, 0.0, 0.0, 0.0, half_sqrt2, half_sqrt2]], dtype=torch.float32)
+    action = torch.tensor([[2.0, 2.0, 0.0, 0.0, 0.0, 1.0, 0.0]], dtype=torch.float32)
+    transition = batch_to_transition({ACTION: action, OBS_STATE: state})
+
+    relative_action = relative_step(transition)[TransitionKey.ACTION]
+    torch.testing.assert_close(relative_action[..., :3], torch.tensor([[0.0, -1.0, 0.0]]), atol=1e-5, rtol=1e-5)
+
+    # Relative orientation is +90° around z, represented as +pi/2 radians in rotvec form.
+    expected_rotvec_radians = torch.tensor([[0.0, 0.0, math.pi / 2]], dtype=torch.float32)
+    torch.testing.assert_close(relative_action[..., 3:6], expected_rotvec_radians, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(relative_action[..., 6], torch.zeros(1), atol=1e-6, rtol=1e-6)
+
+    recovered = absolute_step({TransitionKey.ACTION: relative_action})[TransitionKey.ACTION]
+    torch.testing.assert_close(recovered[..., :3], action[..., :3], atol=1e-5, rtol=1e-5)
+    _assert_quaternion_equivalent(recovered[..., 3:7], action[..., 3:7], atol=1e-5)
+
+
+def test_pose_relative_rotvec_mode_ignores_w_slot_on_postprocess():
+    names = [
+        "tcp_pose.position.x",
+        "tcp_pose.position.y",
+        "tcp_pose.position.z",
+        "tcp_pose.orientation.x",
+        "tcp_pose.orientation.y",
+        "tcp_pose.orientation.z",
+        "tcp_pose.orientation.w",
+    ]
+    relative_step = RelativeActionsProcessorStep(
+        enabled=True,
+        action_names=names,
+        convert_relative_quat_to_rotvec=True,
+    )
+    absolute_step = AbsoluteActionsProcessorStep(enabled=True, relative_step=relative_step)
+
+    state = torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]], dtype=torch.float32)
+    action = torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5)]], dtype=torch.float32)
+    relative_action = relative_step(batch_to_transition({ACTION: action, OBS_STATE: state}))[TransitionKey.ACTION]
+
+    # In rotvec mode, orientation.w is a placeholder slot and should not affect decoding.
+    modified = relative_action.clone()
+    modified[..., 6] = 123.456
+    recovered = absolute_step({TransitionKey.ACTION: modified})[TransitionKey.ACTION]
+    _assert_quaternion_equivalent(recovered[..., 3:7], action[..., 3:7], atol=1e-5)
+
+
 # Chunk-level relative stats test
 
 
