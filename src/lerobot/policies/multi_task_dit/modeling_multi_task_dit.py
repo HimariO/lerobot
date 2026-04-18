@@ -27,7 +27,7 @@ References:
 
 import math
 from collections import deque
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import einops
 import torch
@@ -246,6 +246,23 @@ class CLIPTextEncoder(nn.Module):
         return self.projection(clip_features)
 
 
+class TextEmbedTable(nn.Module):
+
+    def __init__(self, num_embeddings=100, embedding_dim=512):
+        super().__init__()
+        self.text_encoder = nn.Embedding(
+            num_embeddings=num_embeddings, 
+            embedding_dim=embedding_dim
+        )
+    
+    def forward(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
+        """Encode pre-tokenized text to feature vectors."""
+        # Ensure inputs are on the same device as the model
+        device = next(self.parameters()).device
+        input_ids = input_ids.to(device)
+        return self.text_encoder(input_ids)
+
+
 class ObservationEncoder(nn.Module):
     """Handles all observation processing for the conditioning vector."""
 
@@ -278,7 +295,10 @@ class ObservationEncoder(nn.Module):
             self.robot_state_dim = 0
 
         self.text_dim = config.hidden_dim
-        self.text_encoder = CLIPTextEncoder(model_name=config.text_encoder_name, projection_dim=self.text_dim)
+        if config.text_embed_table:
+            self.text_encoder = TextEmbedTable(num_embeddings=100, embedding_dim=self.text_dim)
+        else:
+            self.text_encoder = CLIPTextEncoder(model_name=config.text_encoder_name, projection_dim=self.text_dim)
 
         self._setup_vector_output()
 
