@@ -679,6 +679,7 @@ def _compute_relative_chunk_batch(
         torch.from_numpy(states),
         relative_mask_bool,
         pose_specs,
+        convert_relative_quat_to_rotvec=True,
     )
     return relative_chunks.reshape(-1, all_actions.shape[1]).numpy()
 
@@ -726,6 +727,7 @@ def compute_relative_action_stats(
         enabled=True,
         exclude_joints=exclude_joints,
         action_names=action_names,
+        convert_relative_quat_to_rotvec=True,
     )
     relative_mask_bool = mask_step._build_mask(action_dim)
     relative_mask = np.array(relative_mask_bool, dtype=np.float32)
