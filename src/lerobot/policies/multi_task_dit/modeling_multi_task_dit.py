@@ -679,6 +679,7 @@ class DiffusionObjective(nn.Module):
 
     def compute_loss(self, model: nn.Module, batch: dict[str, Tensor], conditioning_vec: Tensor) -> Tensor:
         clean_actions = batch[ACTION]
+        mask = clean_actions.std(dim=[0, 1], keepdim=True) > 1e-9 # mask out dead slot create by `convert_quat_to_rotvec``
         noise = torch.randn_like(clean_actions)
         timesteps = torch.randint(
             low=0,
@@ -698,6 +699,7 @@ class DiffusionObjective(nn.Module):
 
         predicted = model(noisy_actions, timesteps, conditioning_vec=conditioning_vec)
         loss = F.mse_loss(predicted, target, reduction="none")
+        loss *= mask
 
         if self.do_mask_loss_for_padding and "action_is_pad" in batch:
             valid_actions = ~batch["action_is_pad"]
@@ -753,6 +755,7 @@ class FlowMatchingObjective(nn.Module):
         data = batch[ACTION]
         batch_size = data.shape[0]
         device = data.device
+        mask = data.std(dim=[0, 1], keepdim=True) > 1e-9 # mask out dead slot create by `convert_quat_to_rotvec``
 
         noise = torch.randn_like(data)
         t = self._sample_timesteps(batch_size, device)
@@ -762,6 +765,7 @@ class FlowMatchingObjective(nn.Module):
         target_velocity = data - (1 - self.config.sigma_min) * noise
         predicted_velocity = model(x_t, t, conditioning_vec=conditioning_vec)
         loss = F.mse_loss(predicted_velocity, target_velocity, reduction="none")
+        loss *= mask
 
         if self.do_mask_loss_for_padding and "action_is_pad" in batch:
             valid_mask = ~batch["action_is_pad"]
