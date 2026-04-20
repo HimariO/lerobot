@@ -259,8 +259,9 @@ class TextEmbedTable(nn.Module):
         """Encode pre-tokenized text to feature vectors."""
         # Ensure inputs are on the same device as the model
         device = next(self.parameters()).device
-        input_ids = input_ids.to(device)
-        return self.text_encoder(input_ids)
+        input_ids = input_ids.to(device) # (batch_size, num_tokens == 1)
+        text_embed = self.text_encoder(input_ids)  # (batch_size, 1, embedding_dim)
+        return text_embed.mean(dim=1)
 
 
 class ObservationEncoder(nn.Module):
