@@ -201,12 +201,12 @@ def to_relative_actions_with_pose_specs(
     if state.device != actions.device or state.dtype != actions.dtype:
         state = state.to(device=actions.device, dtype=actions.dtype)
 
-    absolute_actions = actions
-    relative_actions = to_relative_actions(actions, state, mask)
-
     if state.ndim == 3:
         # use last observation as reference point
         state = state[:, -1, :]
+    
+    absolute_actions = actions
+    relative_actions = to_relative_actions(actions, state, mask)
 
     mask_t = torch.as_tensor(mask, dtype=torch.bool, device=actions.device)
     dims = mask_t.shape[0]
@@ -261,13 +261,13 @@ def to_absolute_actions_with_pose_specs(
 
     if state.device != actions.device or state.dtype != actions.dtype:
         state = state.to(device=actions.device, dtype=actions.dtype)
-
-    relative_actions = actions
-    absolute_actions = to_absolute_actions(actions, state, mask)
     
     if state.ndim == 3:
         # use last observation as reference point
         state = state[:, -1, :]
+
+    relative_actions = actions
+    absolute_actions = to_absolute_actions(actions, state, mask)
 
     mask_t = torch.as_tensor(mask, dtype=torch.bool, device=actions.device)
     dims = mask_t.shape[0]
