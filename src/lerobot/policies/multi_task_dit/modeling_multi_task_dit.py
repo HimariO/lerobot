@@ -705,7 +705,7 @@ class DiffusionObjective(nn.Module):
             valid_actions = ~batch["action_is_pad"]
             loss = loss * valid_actions.unsqueeze(-1)
 
-        return loss.mean()
+        return loss.sum() / (torch.abs(loss) > 0).sum()
 
     def conditional_sample(self, model: nn.Module, batch_size: int, conditioning_vec: Tensor) -> Tensor:
         device = next(model.parameters()).device
@@ -771,7 +771,7 @@ class FlowMatchingObjective(nn.Module):
             valid_mask = ~batch["action_is_pad"]
             loss = loss * valid_mask.unsqueeze(-1)
 
-        return loss.mean()
+        return loss.sum() / (torch.abs(loss) > 0).sum()
 
     def conditional_sample(self, model: nn.Module, batch_size: int, conditioning_vec: Tensor) -> Tensor:
         device = next(model.parameters()).device

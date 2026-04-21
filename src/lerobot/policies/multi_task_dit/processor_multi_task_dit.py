@@ -60,6 +60,10 @@ class StrLookupTableStep(ObservationProcessorStep):
         "[AIC] plug cable into SC_PORT_0": 2,
         "[AIC] plug cable into SC_PORT_1": 3,
         "insert sfp_tip plug into nic_card_mount_1": 4,
+        "TaskType.SFP_0": 5,
+        "TaskType.SFP_1": 6,
+        "TaskType.SC_0": 7,
+        "TaskType.SC_1": 8,
     }
 
     def get_task(self, transition: EnvTransition) -> list[str] | None:
@@ -202,6 +206,25 @@ class StrLookupTableStep(ObservationProcessorStep):
             )
 
         return features
+
+
+class FlattenMultiStepObs(ObservationProcessorStep):
+    """
+    Temporarily convert obervation field with shape [batch, observartion_steps, data_dim] 
+     into 2D tensor with shape [batch * observartion_steps, data_dim]. So the remaining processor can handle 
+     the data without compbilty issue.
+    """
+    
+    n_obs_steps: int = 0
+
+    def observation(self, observation: RobotObservation) -> RobotObservation:
+        pass
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        pass
+
 
 
 def make_multi_task_dit_pre_post_processors(
