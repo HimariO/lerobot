@@ -25,6 +25,7 @@ References:
 - https://brysonkjones.substack.com/p/dissecting-and-open-sourcing-multitask-diffusion-transformer-policy
 """
 
+from contextlib import nullcontext
 import math
 from collections import deque
 from typing import TYPE_CHECKING, Any
@@ -43,10 +44,11 @@ from lerobot.utils.import_utils import _transformers_available
 
 # Conditional import for type checking and lazy loading
 if TYPE_CHECKING or _transformers_available:
-    from transformers import CLIPTextModel, CLIPVisionModel
+    from transformers import CLIPTextModel, CLIPVisionModel, DINOv3ViTModel
 else:
     CLIPTextModel = None
     CLIPVisionModel = None
+    DINOv3ViTModel = None
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import populate_queues
 from lerobot.utils.constants import (
@@ -101,13 +103,30 @@ class MultiTaskDiTPolicy(PreTrainedPolicy):
         """Returns parameter groups with different learning rates for vision vs non-vision parameters"""
         non_vision_params = []
         vision_encoder_params = []
+        
+        dino_whitelist = []
+        if isinstance(self.observation_encoder.vision_encoder, DINOVisionEncoder):
+            layers = len(self.observation_encoder.vision_encoder.model.layer)
+            for i in range(max(layers - 4, layers // 2), layers):
+                dino_whitelist.append(f'model.layer.{i}.')
+            dino_whitelist.extend(['model.norm.weight', 'model.norm.bias'])
 
+        # debug = []
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
 
             if "observation_encoder.vision_encoder" in name:
-                vision_encoder_params.append(param)
+                # debug.append(name.replace("observation_encoder.vision_encoder.", ""))
+                if isinstance(self.observation_encoder.vision_encoder, DINOVisionEncoder):
+                    param_name = name.replace("observation_encoder.vision_encoder.", "")
+                    if any(param_name.startswith(prefix) for prefix in dino_whitelist):
+                        print(f"Unfreeze {param_name}")
+                        vision_encoder_params.append(param)
+                    else:
+                        param.requires_grad = False
+                else:
+                    vision_encoder_params.append(param)
             else:
                 non_vision_params.append(param)
 
@@ -213,6 +232,30 @@ class CLIPVisionEncoder(nn.Module):
         return (self.embed_dim, 1, 1)
 
 
+class DINOVisionEncoder(nn.Module):
+    """
+    DINO v3 vision encoder using the CLS token for global image representation.
+    `facebook/dinov3-vitb16-pretrain-lvd1689m`, hidden dim: 768, input image size: 224
+    """
+
+    def __init__(self, model_name: str):
+        super().__init__()
+        self.model_name = model_name
+        self.model = DINOv3ViTModel.from_pretrained(self.model_name)
+        self.num_non_spatial_tokens = 1
+        self.embed_dim = self.model.config.hidden_size
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Encode RGB image to CLS token."""
+        outputs = self.model(pixel_values=x, output_hidden_states=False)
+        cls_token = outputs.last_hidden_state[:, 0, :]
+        b, embed_dim = cls_token.shape
+        return cls_token.reshape(b, embed_dim, 1, 1)
+
+    def get_output_shape(self) -> tuple:
+        return (self.embed_dim, 1, 1)
+
+
 class CLIPTextEncoder(nn.Module):
     """CLIP text encoder with frozen weights and a learnable projection layer.
 
@@ -275,14 +318,17 @@ class ObservationEncoder(nn.Module):
         if config.image_features:
             self.num_cameras = len(config.image_features)
             self.camera_names = list(config.image_features.keys())
+            vis_encoder_cls = (
+                DINOVisionEncoder if "dinov3" in config.vision_encoder_name.lower() else CLIPVisionEncoder
+            )
 
             if config.use_separate_rgb_encoder_per_camera:
                 self.vision_encoders = nn.ModuleList(
-                    [CLIPVisionEncoder(model_name=config.vision_encoder_name) for _ in self.camera_names]
+                    [vis_encoder_cls(model_name=config.vision_encoder_name) for _ in self.camera_names]
                 )
                 self.vision_encoder = None
             else:
-                self.vision_encoder = CLIPVisionEncoder(model_name=config.vision_encoder_name)
+                self.vision_encoder = vis_encoder_cls(model_name=config.vision_encoder_name)
                 self.vision_encoders = None
         else:
             self.vision_encoder = None
@@ -355,32 +401,34 @@ class ObservationEncoder(nn.Module):
 
         if self.vision_encoder is not None or self.vision_encoders is not None:
             images = batch[OBS_IMAGES]
+            encoder_ctx = torch.no_grad() if self.config.freeze_vision_encoder else nullcontext()
 
             if len(images.shape) == 5:
                 images = images.unsqueeze(1)
 
-            if self.config.use_separate_rgb_encoder_per_camera:
-                camera_features = []
-                for cam_idx in range(self.num_cameras):
-                    cam_images = images[:, :, cam_idx]
-                    cam_images_flat = einops.rearrange(cam_images, "b s c h w -> (b s) c h w")
-                    cam_images_flat = self._apply_preprocessing(cam_images_flat)
-                    cam_features = self.vision_encoders[cam_idx](cam_images_flat)
-                    cam_visual_features = cam_features.flatten(start_dim=1)
-                    cam_features_reshaped = einops.rearrange(
-                        cam_visual_features, "(b s) f -> b s f", b=batch_size, s=n_obs_steps
+            with encoder_ctx:
+                if self.config.use_separate_rgb_encoder_per_camera:
+                    camera_features = []
+                    for cam_idx in range(self.num_cameras):
+                        cam_images = images[:, :, cam_idx]
+                        cam_images_flat = einops.rearrange(cam_images, "b s c h w -> (b s) c h w")
+                        cam_images_flat = self._apply_preprocessing(cam_images_flat)
+                        cam_features = self.vision_encoders[cam_idx](cam_images_flat)
+                        cam_visual_features = cam_features.flatten(start_dim=1)
+                        cam_features_reshaped = einops.rearrange(
+                            cam_visual_features, "(b s) f -> b s f", b=batch_size, s=n_obs_steps
+                        )
+                        camera_features.append(cam_features_reshaped)
+                    img_features = torch.cat(camera_features, dim=-1)
+                    conditioning_feats.append(img_features)
+                else:
+                    images_flat = einops.rearrange(images, "b s n c h w -> (b s n) c h w")
+                    images_flat = self._apply_preprocessing(images_flat)
+                    visual_features = self.vision_encoder(images_flat).flatten(start_dim=1)
+                    img_features = einops.rearrange(
+                        visual_features, "(b s n) f -> b s (n f)", b=batch_size, s=n_obs_steps, n=self.num_cameras
                     )
-                    camera_features.append(cam_features_reshaped)
-                img_features = torch.cat(camera_features, dim=-1)
-                conditioning_feats.append(img_features)
-            else:
-                images_flat = einops.rearrange(images, "b s n c h w -> (b s n) c h w")
-                images_flat = self._apply_preprocessing(images_flat)
-                visual_features = self.vision_encoder(images_flat).flatten(start_dim=1)
-                img_features = einops.rearrange(
-                    visual_features, "(b s n) f -> b s (n f)", b=batch_size, s=n_obs_steps, n=self.num_cameras
-                )
-                conditioning_feats.append(img_features)
+                    conditioning_feats.append(img_features)
 
         if self.text_encoder is not None and OBS_LANGUAGE_TOKENS in batch:
             input_ids = batch[OBS_LANGUAGE_TOKENS]  # [batch_size, seq_length]
