@@ -24,10 +24,12 @@ from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.policies.act.configuration_act import ACTConfig
 from lerobot.policies.act.processor_act import make_act_pre_post_processors
 from lerobot.processor import (
+    AbsoluteActionsProcessorStep,
     AddBatchDimensionProcessorStep,
     DataProcessorPipeline,
     DeviceProcessorStep,
     NormalizerProcessorStep,
+    RelativeActionsProcessorStep,
     RenameObservationsProcessorStep,
     TransitionKey,
     UnnormalizerProcessorStep,
@@ -61,6 +63,22 @@ def create_default_stats():
     }
 
 
+def test_act_config_relative_actions_requires_state_feature():
+    """Relative actions require observation.state to be present in ACT inputs."""
+    config = ACTConfig(
+        use_relative_actions=True,
+        input_features={
+            "observation.images.front": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 64, 64)),
+        },
+        output_features={
+            ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(4,)),
+        },
+    )
+
+    with pytest.raises(ValueError, match="observation.state"):
+        config.validate_features()
+
+
 def test_make_act_processor_basic():
     """Test basic creation of ACT processor."""
     config = create_default_config()
@@ -73,16 +91,18 @@ def test_make_act_processor_basic():
     assert postprocessor.name == "policy_postprocessor"
 
     # Check steps in preprocessor
-    assert len(preprocessor.steps) == 4
+    assert len(preprocessor.steps) == 5
     assert isinstance(preprocessor.steps[0], RenameObservationsProcessorStep)
     assert isinstance(preprocessor.steps[1], AddBatchDimensionProcessorStep)
     assert isinstance(preprocessor.steps[2], DeviceProcessorStep)
-    assert isinstance(preprocessor.steps[3], NormalizerProcessorStep)
+    assert isinstance(preprocessor.steps[3], RelativeActionsProcessorStep)
+    assert isinstance(preprocessor.steps[4], NormalizerProcessorStep)
 
     # Check steps in postprocessor
-    assert len(postprocessor.steps) == 2
+    assert len(postprocessor.steps) == 3
     assert isinstance(postprocessor.steps[0], UnnormalizerProcessorStep)
-    assert isinstance(postprocessor.steps[1], DeviceProcessorStep)
+    assert isinstance(postprocessor.steps[1], AbsoluteActionsProcessorStep)
+    assert isinstance(postprocessor.steps[2], DeviceProcessorStep)
 
 
 def test_act_processor_normalization():
@@ -113,6 +133,34 @@ def test_act_processor_normalization():
 
     # Check that action is unnormalized
     assert postprocessed.shape == (1, 4)
+
+
+def test_act_processor_relative_actions_roundtrip():
+    """Test that relative actions are applied in preprocessing and restored in postprocessing."""
+    config = create_default_config()
+    config.use_relative_actions = True
+    config.relative_exclude_joints = ["gripper"]
+    config.action_feature_names = ["joint_1", "joint_2", "joint_3", "gripper"]
+    config.normalization_mapping = {
+        "VISUAL": NormalizationMode.IDENTITY,
+        "STATE": NormalizationMode.IDENTITY,
+        "ACTION": NormalizationMode.IDENTITY,
+    }
+
+    preprocessor, postprocessor = make_act_pre_post_processors(config=config, dataset_stats=None)
+
+    input_state = torch.tensor([1.0, 2.0, 3.0, 0.2, 0.0, 0.0, 0.0])
+    input_action = torch.tensor([3.0, 6.0, 9.0, 0.7])
+    transition = create_transition({OBS_STATE: input_state}, input_action)
+    batch = transition_to_batch(transition)
+
+    processed = preprocessor(batch)
+
+    expected_relative_action = torch.tensor([2.0, 4.0, 6.0, 0.7])
+    assert torch.allclose(processed[TransitionKey.ACTION.value][0], expected_relative_action, atol=1e-5)
+
+    restored_action = postprocessor(processed[TransitionKey.ACTION.value][0:1])
+    assert torch.allclose(restored_action[0], input_action, atol=1e-5)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -390,7 +438,7 @@ def test_act_processor_bfloat16_device_float32_normalizer():
     preprocessor.steps = modified_steps
 
     # Verify initial normalizer configuration
-    normalizer_step = preprocessor.steps[3]  # NormalizerProcessorStep
+    normalizer_step = next(step for step in preprocessor.steps if isinstance(step, NormalizerProcessorStep))
     assert normalizer_step.dtype == torch.float32
 
     # Create test data

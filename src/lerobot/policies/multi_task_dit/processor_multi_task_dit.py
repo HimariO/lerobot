@@ -59,7 +59,7 @@ class StrLookupTableStep(ObservationProcessorStep):
         "[AIC] plug cable into SFP_PORT_1": 1,
         "[AIC] plug cable into SC_PORT_0": 2,
         "[AIC] plug cable into SC_PORT_1": 3,
-        "insert sfp_tip plug into nic_card_mount_1": 4,
+        "insert sfp_tip plug into nic_card_mount_1": 5,
         "TaskType.SFP_0": 5,
         "TaskType.SFP_1": 6,
         "TaskType.SC_0": 7,
