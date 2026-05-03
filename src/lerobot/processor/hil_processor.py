@@ -67,6 +67,7 @@ class HasTeleopEvents(Protocol):
             - `terminate_episode`: bool - Whether to terminate the current episode.
             - `success`: bool - Whether the episode was successful.
             - `rerecord_episode`: bool - Whether to rerecord the episode.
+            - `reward`: float - Optional task reward emitted by the teleoperator.
         """
         ...
 
@@ -306,6 +307,37 @@ class TimeLimitProcessorStep(TruncatedProcessorStep):
     def reset(self) -> None:
         """Resets the step counter, typically called at the start of a new episode."""
         self.current_step = 0
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+
+@dataclass
+@ProcessorStepRegistry.register("teleop_reward_processor")
+class TeleopRewardProcessorStep(ProcessorStep):
+    """
+    Overrides transition reward with reward values emitted by teleoperator events.
+
+    This enables task-specific teleoperators to provide direct reward signals
+    (for example geometric success checks) without relying on image classifiers.
+    """
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        new_transition = transition.copy()
+        info = new_transition.get(TransitionKey.INFO, {})
+
+        reward_value = info.get(TeleopEvents.REWARD, info.get(TeleopEvents.REWARD.value))
+        if reward_value is None:
+            return new_transition
+
+        try:
+            new_transition[TransitionKey.REWARD] = float(reward_value)
+        except (TypeError, ValueError):
+            return new_transition
+
+        return new_transition
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]

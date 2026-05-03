@@ -49,6 +49,7 @@ from .hil_processor import (
     ImageCropResizeProcessorStep,
     InterventionActionProcessorStep,
     RewardClassifierProcessorStep,
+    TeleopRewardProcessorStep,
     TimeLimitProcessorStep,
 )
 from .normalize_processor import NormalizerProcessorStep, UnnormalizerProcessorStep, hotswap_stats
@@ -124,6 +125,7 @@ __all__ = [
     "RobotObservation",
     "RenameObservationsProcessorStep",
     "RewardClassifierProcessorStep",
+    "TeleopRewardProcessorStep",
     "RewardProcessorStep",
     "DataProcessorPipeline",
     "TimeLimitProcessorStep",

@@ -73,6 +73,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from pprint import pformat
 from typing import Any
+import numpy as np
 
 import torch
 
@@ -134,7 +135,8 @@ from lerobot.teleoperators import (  # noqa: F401
     unitree_g1,
 )
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
-from lerobot.utils.constants import ACTION, OBS_STR
+from lerobot.teleoperators.utils import TeleopEvents
+from lerobot.utils.constants import ACTION, OBS_STR, REWARD
 from lerobot.utils.control_utils import (
     init_keyboard_listener,
     is_headless,
@@ -150,6 +152,7 @@ from lerobot.utils.utils import (
     log_say,
 )
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
+SUCCESS_SIGNAL_KEY = "next.success"
 
 
 @dataclass
@@ -281,6 +284,23 @@ class RecordConfig:
                   ( Rerun Log / Loop Wait )
 """
 
+
+def get_teleop_events(teleop: Teleoperator | list[Teleoperator] | None) -> dict[Any, Any]:
+    if teleop is None:
+        return {}
+
+    teleop_devices = teleop if isinstance(teleop, list) else [teleop]
+    for teleop_device in teleop_devices:
+        if hasattr(teleop_device, "get_teleop_events"):
+            return teleop_device.get_teleop_events()
+
+    return {}
+
+
+def get_teleop_event_value(
+    teleop_events: dict[Any, Any], event: TeleopEvents, default: Any
+) -> Any:
+    return teleop_events.get(event, teleop_events.get(event.value, default))
 
 @safe_stop_image_writer
 def record_loop(
@@ -461,6 +481,17 @@ def record_loop(
         if dataset is not None and is_record_frame:
             action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
             frame = {**observation_frame, **action_frame, "task": single_task}
+            teleop_events = get_teleop_events(teleop)
+            success_signal = bool(get_teleop_event_value(teleop_events, TeleopEvents.SUCCESS, False))
+            reward_signal = get_teleop_event_value(
+                teleop_events, TeleopEvents.REWARD, float(success_signal)
+            )
+            try:
+                reward_signal = float(reward_signal)
+            except (TypeError, ValueError):
+                reward_signal = float(success_signal)
+            frame[REWARD] = np.array([reward_signal], dtype=np.float32)
+            frame[SUCCESS_SIGNAL_KEY] = np.array([success_signal], dtype=bool)
             dataset.add_frame(frame)
 
         if display_data:
@@ -512,6 +543,8 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             use_videos=cfg.dataset.video,
         ),
     )
+    dataset_features[REWARD] = {"dtype": "float32", "shape": (1,), "names": None}
+    dataset_features[SUCCESS_SIGNAL_KEY] = {"dtype": "bool", "shape": (1,), "names": None}
 
     dataset = None
     listener = None

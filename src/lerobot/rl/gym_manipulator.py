@@ -43,6 +43,7 @@ from lerobot.processor import (
     MapTensorToDeltaActionDictStep,
     Numpy2TorchActionProcessorStep,
     RewardClassifierProcessorStep,
+    TeleopRewardProcessorStep,
     RobotActionToPolicyActionProcessorStep,
     RobotObservation,
     TimeLimitProcessorStep,
@@ -467,6 +468,7 @@ def make_processors(
             )
         )
 
+    env_pipeline_steps.append(TeleopRewardProcessorStep())
     env_pipeline_steps.append(AddBatchDimensionProcessorStep())
     env_pipeline_steps.append(DeviceProcessorStep(device=device))
 
