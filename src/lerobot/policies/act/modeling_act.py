@@ -141,8 +141,9 @@ class ACTPolicy(PreTrainedPolicy):
 
         actions_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
 
+        mask = batch[ACTION].std(dim=[0, 1], keepdim=True) > 1e-9 # mask out dead slot create by `convert_quat_to_rotvec``
         l1_loss = (
-            F.l1_loss(batch[ACTION], actions_hat, reduction="none") * ~batch["action_is_pad"].unsqueeze(-1)
+            (F.l1_loss(batch[ACTION], actions_hat, reduction="none") * mask) * ~batch["action_is_pad"].unsqueeze(-1)
         ).mean()
 
         loss_dict = {"l1_loss": l1_loss.item()}
