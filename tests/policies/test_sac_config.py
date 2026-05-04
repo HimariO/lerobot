@@ -65,6 +65,9 @@ def test_sac_config_default_initialization():
     assert config.image_encoder_hidden_dim == 32
     assert config.shared_encoder is True
     assert config.num_discrete_actions is None
+    assert config.use_relative_actions is False
+    assert config.relative_exclude_joints == ["gripper"]
+    assert config.action_feature_names is None
     assert config.image_embedding_pooling_dim == 8
 
     # Training parameters
@@ -214,4 +217,16 @@ def test_validate_features_missing_action():
         output_features={"wrong_key": PolicyFeature(type=FeatureType.ACTION, shape=(3,))},
     )
     with pytest.raises(ValueError, match="You must provide 'action' in the output features"):
+        config.validate_features()
+
+
+def test_validate_features_relative_actions_require_state():
+    config = SACConfig(
+        input_features={OBS_IMAGE: PolicyFeature(type=FeatureType.VISUAL, shape=(3, 84, 84))},
+        output_features={ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(3,))},
+        use_relative_actions=True,
+    )
+    with pytest.raises(
+        ValueError, match="`use_relative_actions=True` requires `observation.state` in `input_features`."
+    ):
         config.validate_features()

@@ -133,6 +133,12 @@ class SACConfig(PreTrainedConfig):
     shared_encoder: bool = True
     # Number of discrete actions, eg for gripper actions
     num_discrete_actions: int | None = None
+    # Relative actions: converts absolute actions to relative (relative to state).
+    use_relative_actions: bool = False
+    # Joint names to exclude from relative (kept absolute). Empty list = all dims relative.
+    relative_exclude_joints: list[str] = field(default_factory=lambda: ["gripper"])
+    # Populated at runtime from dataset metadata by make_policy.
+    action_feature_names: list[str] | None = None
     # Dimension of the image embedding pooling
     image_embedding_pooling_dim: int = 8
 
@@ -225,6 +231,11 @@ class SACConfig(PreTrainedConfig):
 
         if ACTION not in self.output_features:
             raise ValueError("You must provide 'action' in the output features")
+
+        if self.use_relative_actions and not has_state:
+            raise ValueError(
+                "`use_relative_actions=True` requires `observation.state` in `input_features`."
+            )
 
     @property
     def image_features(self) -> list[str]:

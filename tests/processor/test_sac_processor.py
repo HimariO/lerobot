@@ -24,10 +24,12 @@ from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.policies.sac.configuration_sac import SACConfig
 from lerobot.policies.sac.processor_sac import make_sac_pre_post_processors
 from lerobot.processor import (
+    AbsoluteActionsProcessorStep,
     AddBatchDimensionProcessorStep,
     DataProcessorPipeline,
     DeviceProcessorStep,
     NormalizerProcessorStep,
+    RelativeActionsProcessorStep,
     RenameObservationsProcessorStep,
     TransitionKey,
     UnnormalizerProcessorStep,
@@ -76,16 +78,18 @@ def test_make_sac_processor_basic():
     assert postprocessor.name == "policy_postprocessor"
 
     # Check steps in preprocessor
-    assert len(preprocessor.steps) == 4
+    assert len(preprocessor.steps) == 5
     assert isinstance(preprocessor.steps[0], RenameObservationsProcessorStep)
     assert isinstance(preprocessor.steps[1], AddBatchDimensionProcessorStep)
     assert isinstance(preprocessor.steps[2], DeviceProcessorStep)
-    assert isinstance(preprocessor.steps[3], NormalizerProcessorStep)
+    assert isinstance(preprocessor.steps[3], RelativeActionsProcessorStep)
+    assert isinstance(preprocessor.steps[4], NormalizerProcessorStep)
 
     # Check steps in postprocessor
-    assert len(postprocessor.steps) == 2
+    assert len(postprocessor.steps) == 3
     assert isinstance(postprocessor.steps[0], UnnormalizerProcessorStep)
-    assert isinstance(postprocessor.steps[1], DeviceProcessorStep)
+    assert isinstance(postprocessor.steps[1], AbsoluteActionsProcessorStep)
+    assert isinstance(postprocessor.steps[2], DeviceProcessorStep)
 
 
 def test_sac_processor_normalization_modes():
@@ -392,7 +396,7 @@ def test_sac_processor_bfloat16_device_float32_normalizer():
     preprocessor.steps = modified_steps
 
     # Verify initial normalizer configuration
-    normalizer_step = preprocessor.steps[3]  # NormalizerProcessorStep
+    normalizer_step = next(step for step in preprocessor.steps if isinstance(step, NormalizerProcessorStep))
     assert normalizer_step.dtype == torch.float32
 
     # Create test data
