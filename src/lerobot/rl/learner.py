@@ -84,6 +84,7 @@ from lerobot.transport.utils import (
 )
 from lerobot.utils.constants import (
     ACTION,
+    OBS_STATE,
     CHECKPOINTS_DIR,
     LAST_CHECKPOINT_LINK,
     PRETRAINED_MODEL_DIR,
@@ -1221,17 +1222,17 @@ def process_transitions(
         for transition in transition_list:
             transition = move_transition_to_device(transition=transition, device=device)
 
+            # convert RobotAction to PolicyAction so it can be use for training
             if cfg.use_policy_pre_post_processors:
+                # DataProcessorPipeline expects canonical batch format as input, where
+                # observation entries are flattened top-level keys such as
+                # "observation.*". Passing {"observation": {...}} makes
+                # batch_to_transition() drop observations and raises in
+                # ObservationProcessorStep.
                 act_transition = {
-                    TransitionKey.OBSERVATION: None,
-                    TransitionKey.ACTION: transition[ACTION],
-                    TransitionKey.REWARD: None,
-                    TransitionKey.DONE: None,
-                    TransitionKey.TRUNCATED: None,
-                    TransitionKey.INFO: None,
-                    TransitionKey.COMPLEMENTARY_DATA: None,
+                    **transition["state"],
+                    ACTION: transition[ACTION],
                 }
-                # convert RobotAction to PolicyAction so it can be use for training
                 act_transition = policy_preprocessor(act_transition)
                 transition[ACTION] = act_transition[TransitionKey.ACTION]
 

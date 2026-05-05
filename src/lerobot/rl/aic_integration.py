@@ -27,6 +27,8 @@ from lerobot.envs.configs import HILSerlRobotEnvConfig
 from lerobot.processor import DataProcessorPipeline, EnvTransition, ProcessorStep, RobotObservation, TransitionKey
 from lerobot.teleoperators.utils import TeleopEvents
 from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
+from lerobot.teleoperators import Teleoperator
+
 
 AIC_DEFAULT_EE_POSE_ACTION_KEYS = (
     "position.x",
@@ -161,12 +163,14 @@ class AICRobotEnv(gym.Env):
     def __init__(
         self,
         robot,
+        teleop_device: Teleoperator,
         cfg: HILSerlRobotEnvConfig,
         display_cameras: bool = False,
         reset_time_s: float = 2.0,
     ) -> None:
         super().__init__()
         self.robot = robot
+        self.teleop_device = teleop_device
         self.cfg = cfg
         self.display_cameras = display_cameras
         self.reset_time_s = reset_time_s
@@ -384,6 +388,9 @@ class AICRobotEnv(gym.Env):
     def reset(
         self, *, seed: int | None = None, options: dict[str, Any] | None = None
     ) -> tuple[RobotObservation, dict[str, Any]]:
+        # use speical `AICCheatCodeTeleop` method to reset env through gz ros and aic-bringup
+        self.teleop_device.reset_gz_sim()
+
         if self.reset_time_s > 0:
             time.sleep(self.reset_time_s)
 

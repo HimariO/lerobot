@@ -355,6 +355,7 @@ def make_robot_env(cfg: HILSerlRobotEnvConfig) -> tuple[gym.Env, Any]:
     if cfg.name == "aic_robot":
         env = AICRobotEnv(
             robot=robot,
+            teleop_device=teleop_device,
             cfg=cfg,
             display_cameras=display_cameras,
             reset_time_s=reset_time_s,
