@@ -468,6 +468,51 @@ def test_from_lerobot_dataset(tmp_path):
         )
 
 
+def test_from_lerobot_dataset_with_transition_processor_hook(tmp_path):
+    ds, _ = create_dataset_from_replay_buffer(tmp_path)
+
+    baseline_buffer = ReplayBuffer.from_lerobot_dataset(
+        ds,
+        state_keys=list(state_dims()),
+        device="cpu",
+        capacity=len(ds),
+        use_drq=False,
+    )
+
+    hook_call_count = {"count": 0}
+
+    def transition_hook(transition):
+        hook_call_count["count"] += 1
+        transition["state"] = {k: v + 1.0 for k, v in transition["state"].items()}
+        transition["next_state"] = {k: v + 1.0 for k, v in transition["next_state"].items()}
+        transition[ACTION] = transition[ACTION] + 2.0
+        return transition
+
+    hooked_buffer = ReplayBuffer.from_lerobot_dataset(
+        ds,
+        state_keys=list(state_dims()),
+        device="cpu",
+        capacity=len(ds),
+        use_drq=False,
+        transition_processor_hook=transition_hook,
+    )
+
+    assert hook_call_count["count"] == len(ds)
+    torch.testing.assert_close(
+        hooked_buffer.actions[: len(ds)],
+        baseline_buffer.actions[: len(ds)] + 2.0,
+    )
+    for state_key in state_dims():
+        torch.testing.assert_close(
+            hooked_buffer.states[state_key][: len(ds)],
+            baseline_buffer.states[state_key][: len(ds)] + 1.0,
+        )
+        torch.testing.assert_close(
+            hooked_buffer.next_states[state_key][: len(ds)],
+            baseline_buffer.next_states[state_key][: len(ds)] + 1.0,
+        )
+
+
 def test_buffer_sample_alignment():
     # Initialize buffer
     buffer = ReplayBuffer(capacity=100, device="cpu", state_keys=["state_value"], storage_device="cpu")

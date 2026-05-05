@@ -136,7 +136,7 @@ from lerobot.teleoperators import (  # noqa: F401
 )
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
 from lerobot.teleoperators.utils import TeleopEvents
-from lerobot.utils.constants import ACTION, OBS_STR, REWARD
+from lerobot.utils.constants import ACTION, OBS_STR, REWARD, DONE
 from lerobot.utils.control_utils import (
     init_keyboard_listener,
     is_headless,
@@ -492,6 +492,7 @@ def record_loop(
                 reward_signal = float(success_signal)
             frame[REWARD] = np.array([reward_signal], dtype=np.float32)
             frame[SUCCESS_SIGNAL_KEY] = np.array([success_signal], dtype=bool)
+            frame[DONE] = frame[SUCCESS_SIGNAL_KEY]
             dataset.add_frame(frame)
 
         if display_data:
@@ -545,6 +546,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
     )
     dataset_features[REWARD] = {"dtype": "float32", "shape": (1,), "names": None}
     dataset_features[SUCCESS_SIGNAL_KEY] = {"dtype": "bool", "shape": (1,), "names": None}
+    dataset_features[DONE] = {"dtype": "bool", "shape": (1,), "names": None}
 
     dataset = None
     listener = None

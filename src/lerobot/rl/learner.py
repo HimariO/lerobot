@@ -44,10 +44,12 @@ For more details on the complete HILSerl training workflow, see:
 https://github.com/michel-aractingi/lerobot-hilserl-guide
 """
 
+import copy
 import logging
 import os
 import shutil
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from pprint import pformat
@@ -64,8 +66,9 @@ from lerobot.configs import parser
 from lerobot.configs.train import TrainRLServerPipelineConfig
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.policies.factory import make_policy
+from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.sac.modeling_sac import SACPolicy
+from lerobot.processor import TransitionKey
 from lerobot.rl.buffer import ReplayBuffer, concatenate_batch_transitions
 from lerobot.rl.process import ProcessSignalHandler
 from lerobot.rl.wandb_utils import WandBLogger
@@ -87,6 +90,7 @@ from lerobot.utils.constants import (
     TRAINING_STATE_DIR,
 )
 from lerobot.utils.device_utils import get_safe_torch_device
+from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.train_utils import (
     get_step_checkpoint_dir,
@@ -94,7 +98,7 @@ from lerobot.utils.train_utils import (
     save_checkpoint,
     update_last_checkpoint,
 )
-from lerobot.utils.transition import move_state_dict_to_device, move_transition_to_device
+from lerobot.utils.transition import Transition, move_state_dict_to_device, move_transition_to_device
 from lerobot.utils.utils import (
     format_big_number,
     init_logging,
@@ -366,6 +370,7 @@ def add_actor_information_and_train(
             device=device,
             dataset_repo_id=dataset_repo_id,
             shutdown_event=shutdown_event,
+            cfg=cfg,
         )
 
         # Process all available interaction messages sent by the actor server
@@ -1000,6 +1005,7 @@ def initialize_offline_replay_buffer(
         )
 
     logging.info("Convert to a offline replay buffer")
+    transition_processor_hook = make_transition_processor_hook(cfg=cfg)
     offline_replay_buffer = ReplayBuffer.from_lerobot_dataset(
         offline_dataset,
         device=device,
@@ -1007,9 +1013,65 @@ def initialize_offline_replay_buffer(
         storage_device=storage_device,
         optimize_memory=True,
         capacity=cfg.policy.offline_buffer_capacity,
+        transition_processor_hook=transition_processor_hook,
     )
     return offline_replay_buffer
 
+
+def make_transition_processor_hook(
+    cfg: TrainRLServerPipelineConfig,
+) -> Callable[[Transition], Transition] | None:
+    """Create an optional transition hook to align offline replay data with policy processors."""
+    if not cfg.use_policy_pre_post_processors:
+        return None
+    
+    policy_cfg = copy.deepcopy(cfg.policy)
+    policy_cfg.device = 'cpu' # HACK: prepcoessr include a step to move data to same device same policy
+
+    policy_preprocessor, _ = make_pre_post_processors(
+        policy_cfg=policy_cfg,
+        pretrained_path=str(cfg.policy.pretrained_path) if cfg.policy.pretrained_path else None,
+        dataset_stats=getattr(cfg.policy, "dataset_stats", None),
+    )
+
+    def _process_transition(transition: Transition) -> Transition:
+        state_batch = dict(transition["state"])
+        state_batch[ACTION] = transition[ACTION]
+
+        processed_state_batch = policy_preprocessor(state_batch)
+        processed_next_state = policy_preprocessor(dict(transition["next_state"]))
+
+        # NOTE: take the raw Robot Action to align the behavior with action_processor in actor env.
+        # processed_action = transition[ACTION] 
+        processed_action = processed_state_batch.pop(ACTION, transition[ACTION])
+        if not isinstance(processed_action, torch.Tensor):
+            raise ValueError("Expected tensor action after policy preprocessing in offline replay hook.")
+
+        # HACK: policy_preprocessor will add fields like 'next.reward' into result for some reason.
+        for k in list(processed_state_batch.keys()):
+            if k not in state_batch:
+                processed_state_batch.pop(k)
+        for k in list(processed_next_state.keys()):
+            if k not in state_batch:
+                processed_next_state.pop(k)
+        processed_next_state.pop(ACTION)
+        
+        processed_transition: Transition = {
+            "state": processed_state_batch,
+            ACTION: processed_action,
+            "reward": transition["reward"],
+            "next_state": processed_next_state,
+            "done": transition["done"],
+            "truncated": transition["truncated"],
+            "complementary_info": transition.get("complementary_info"),
+        }
+
+        if processed_transition["done"] or processed_transition["truncated"]:
+            policy_preprocessor.reset()
+
+        return processed_transition
+
+    return _process_transition
 
 # Utilities/Helpers functions
 
@@ -1130,6 +1192,7 @@ def process_transitions(
     device: str,
     dataset_repo_id: str | None,
     shutdown_event: any,
+    cfg: TrainRLServerPipelineConfig,
 ):
     """Process all available transitions from the queue.
 
@@ -1141,12 +1204,36 @@ def process_transitions(
         dataset_repo_id: Repository ID for dataset
         shutdown_event: Event to signal shutdown
     """
+
+    if cfg.use_policy_pre_post_processors:
+        policy_preprocessor, _ = make_pre_post_processors(
+            policy_cfg=cfg.policy,
+            pretrained_path=str(cfg.policy.pretrained_path) if cfg.policy.pretrained_path else None,
+            dataset_stats=getattr(cfg.policy, "dataset_stats", None),
+        )
+    else:
+        policy_preprocessor = lambda x: x
+
     while not transition_queue.empty() and not shutdown_event.is_set():
         transition_list = transition_queue.get()
         transition_list = bytes_to_transitions(buffer=transition_list)
 
         for transition in transition_list:
             transition = move_transition_to_device(transition=transition, device=device)
+
+            if cfg.use_policy_pre_post_processors:
+                act_transition = {
+                    TransitionKey.OBSERVATION: None,
+                    TransitionKey.ACTION: transition[ACTION],
+                    TransitionKey.REWARD: None,
+                    TransitionKey.DONE: None,
+                    TransitionKey.TRUNCATED: None,
+                    TransitionKey.INFO: None,
+                    TransitionKey.COMPLEMENTARY_DATA: None,
+                }
+                # convert RobotAction to PolicyAction so it can be use for training
+                act_transition = policy_preprocessor(act_transition)
+                transition[ACTION] = act_transition[TransitionKey.ACTION]
 
             # Skip transitions with NaN values
             if check_nan_in_transition(
@@ -1199,5 +1286,8 @@ def process_interaction_messages(
 
 
 if __name__ == "__main__":
-    train_cli()
+    from loguru import logger
+    register_third_party_plugins()
+    with logger.catch(reraise=True):
+        train_cli()
     logging.info("[LEARNER] main finished")

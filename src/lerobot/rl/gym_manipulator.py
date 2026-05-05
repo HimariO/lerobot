@@ -29,6 +29,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.envs.configs import HILSerlRobotEnvConfig
 from lerobot.model.kinematics import RobotKinematics
 from lerobot.processor import (
+    AICInterventionActionProcessorStep,
     AddBatchDimensionProcessorStep,
     AddTeleopActionAsComplimentaryDataStep,
     AddTeleopEventsAsInfoStep,
@@ -77,6 +78,12 @@ from lerobot.teleoperators.utils import TeleopEvents
 from lerobot.utils.constants import ACTION, DONE, OBS_IMAGES, OBS_STATE, REWARD
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import log_say
+from .aic_integration import (
+    AICRobotEnv,
+    PolicyActionPostprocessorStep,
+    PolicyObservationPreprocessorStep,
+    resolve_action_key_order,
+)
 
 from .joint_observations_processor import JointVelocityProcessorStep, MotorCurrentProcessorStep
 
@@ -343,19 +350,34 @@ def make_robot_env(cfg: HILSerlRobotEnvConfig) -> tuple[gym.Env, Any]:
         cfg.processor.observation.display_cameras if cfg.processor.observation is not None else False
     )
     reset_pose = cfg.processor.reset.fixed_reset_joint_positions if cfg.processor.reset is not None else None
+    reset_time_s = cfg.processor.reset.reset_time_s if cfg.processor.reset is not None else 5.0
 
-    env = RobotEnv(
-        robot=robot,
-        use_gripper=use_gripper,
-        display_cameras=display_cameras,
-        reset_pose=reset_pose,
-    )
+    if cfg.name == "aic_robot":
+        env = AICRobotEnv(
+            robot=robot,
+            cfg=cfg,
+            display_cameras=display_cameras,
+            reset_time_s=reset_time_s,
+        )
+    else:
+        env = RobotEnv(
+            robot=robot,
+            use_gripper=use_gripper,
+            display_cameras=display_cameras,
+            reset_pose=reset_pose,
+            reset_time_s=reset_time_s,
+        )
 
     return env, teleop_device
 
 
 def make_processors(
-    env: gym.Env, teleop_device: Teleoperator | None, cfg: HILSerlRobotEnvConfig, device: str = "cpu"
+    env: gym.Env,
+    teleop_device: Teleoperator | None,
+    cfg: HILSerlRobotEnvConfig,
+    device: str = "cpu",
+    policy_preprocessor: DataProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None,
+    policy_postprocessor: DataProcessorPipeline[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[
     DataProcessorPipeline[EnvTransition, EnvTransition], DataProcessorPipeline[EnvTransition, EnvTransition]
 ]:
@@ -370,6 +392,16 @@ def make_processors(
     Returns:
         Tuple of (environment processor, action processor).
     """
+    use_policy_pre_post_processors = (
+        policy_preprocessor is not None or policy_postprocessor is not None
+    )
+    if use_policy_pre_post_processors and (
+        policy_preprocessor is None or policy_postprocessor is None
+    ):
+        raise ValueError(
+            "Both policy_preprocessor and policy_postprocessor must be provided when enabling "
+            "policy pre/post processor mode."
+        )
     terminate_on_success = (
         cfg.processor.reset.terminate_on_success if cfg.processor.reset is not None else True
     )
@@ -393,46 +425,52 @@ def make_processors(
         ), DataProcessorPipeline(
             steps=action_pipeline_steps, to_transition=identity_transition, to_output=identity_transition
         )
-
-    # Full processor pipeline for real robot environment
-    # Get robot and motor information for kinematics
-    motor_names = list(env.robot.bus.motors.keys())
+    is_aic_robot = cfg.name == "aic_robot"
+    supports_bus = (
+        hasattr(env, "robot")
+        and hasattr(env.robot, "bus")
+        and hasattr(env.robot.bus, "motors")
+    )
+    motor_names = list(env.robot.bus.motors.keys()) if supports_bus else []
 
     # Set up kinematics solver if inverse kinematics is configured
     kinematics_solver = None
-    if cfg.processor.inverse_kinematics is not None:
+    if (
+        not is_aic_robot
+        and cfg.processor.inverse_kinematics is not None
+        and len(motor_names) > 0
+    ):
         kinematics_solver = RobotKinematics(
             urdf_path=cfg.processor.inverse_kinematics.urdf_path,
             target_frame_name=cfg.processor.inverse_kinematics.target_frame_name,
             joint_names=motor_names,
         )
+    env_pipeline_steps = [] if use_policy_pre_post_processors else [VanillaObservationProcessorStep()]
 
-    env_pipeline_steps = [VanillaObservationProcessorStep()]
-
-    if cfg.processor.observation is not None:
-        if cfg.processor.observation.add_joint_velocity_to_observation:
+    if not use_policy_pre_post_processors and cfg.processor.observation is not None:
+        if cfg.processor.observation.add_joint_velocity_to_observation and supports_bus:
             env_pipeline_steps.append(JointVelocityProcessorStep(dt=1.0 / cfg.fps))
-        if cfg.processor.observation.add_current_to_observation:
+        if cfg.processor.observation.add_current_to_observation and supports_bus:
             env_pipeline_steps.append(MotorCurrentProcessorStep(robot=env.robot))
 
-    add_ee_pose = (
-        cfg.processor.observation is not None and cfg.processor.observation.add_ee_pose_to_observation
-    )
-    if kinematics_solver is not None and add_ee_pose:
-        env_pipeline_steps.append(
-            ForwardKinematicsJointsToEEObservation(
-                kinematics=kinematics_solver,
-                motor_names=motor_names,
-            )
+        add_ee_pose = (
+            cfg.processor.observation is not None and cfg.processor.observation.add_ee_pose_to_observation
         )
+        if kinematics_solver is not None and add_ee_pose:
+            env_pipeline_steps.append(
+                ForwardKinematicsJointsToEEObservation(
+                    kinematics=kinematics_solver,
+                    motor_names=motor_names,
+                )
+            )
 
-    if cfg.processor.image_preprocessing is not None:
-        env_pipeline_steps.append(
-            ImageCropResizeProcessorStep(
-                crop_params_dict=cfg.processor.image_preprocessing.crop_params_dict,
-                resize_size=cfg.processor.image_preprocessing.resize_size,
+        if cfg.processor.image_preprocessing is not None:
+            env_pipeline_steps.append(
+                ImageCropResizeProcessorStep(
+                    crop_params_dict=cfg.processor.image_preprocessing.crop_params_dict,
+                    resize_size=cfg.processor.image_preprocessing.resize_size,
+                )
             )
-        )
 
     # Add time limit processor if reset config exists
     if cfg.processor.reset is not None:
@@ -469,21 +507,55 @@ def make_processors(
         )
 
     env_pipeline_steps.append(TeleopRewardProcessorStep())
-    env_pipeline_steps.append(AddBatchDimensionProcessorStep())
-    env_pipeline_steps.append(DeviceProcessorStep(device=device))
+    if use_policy_pre_post_processors:
+        env_pipeline_steps.append(
+            PolicyObservationPreprocessorStep(policy_preprocessor=policy_preprocessor)  # type: ignore[arg-type]
+        )
+    else:
+        env_pipeline_steps.append(AddBatchDimensionProcessorStep())
+        env_pipeline_steps.append(DeviceProcessorStep(device=device))
+
+    if is_aic_robot:
+        fallback_action_keys = list(getattr(env.robot, "action_features", {}).keys())
+        action_key_order = resolve_action_key_order(
+            cfg=cfg,
+            fallback_action_keys=fallback_action_keys,
+        )
+        intervention_step = AICInterventionActionProcessorStep(
+            action_keys=action_key_order,
+            terminate_on_success=terminate_on_success,
+        )
+    else:
+        intervention_step = InterventionActionProcessorStep(
+            use_gripper=cfg.processor.gripper.use_gripper if cfg.processor.gripper is not None else False,
+            terminate_on_success=terminate_on_success,
+        )
 
     action_pipeline_steps = [
         AddTeleopActionAsComplimentaryDataStep(teleop_device=teleop_device),
         AddTeleopEventsAsInfoStep(teleop_device=teleop_device),
-        InterventionActionProcessorStep(
-            use_gripper=cfg.processor.gripper.use_gripper if cfg.processor.gripper is not None else False,
-            terminate_on_success=terminate_on_success,
-        ),
     ]
 
-    # Replace InverseKinematicsProcessor with new kinematic processors
-    if cfg.processor.inverse_kinematics is not None and kinematics_solver is not None:
-        # Add EE bounds and safety processor
+    if use_policy_pre_post_processors:
+        action_pipeline_steps.append(
+            PolicyActionPostprocessorStep(policy_postprocessor=policy_postprocessor)  # type: ignore[arg-type]
+        )
+        """
+         put this step last to make sure action value leaner use ('TELEOP_ACTION_KEY`) is base-frame EE pose, 
+         no matter action is came from teleop or policy.
+         since policy may output normalized delta-EE-pose, we need the post-processor to convert it back to non-delta pose.
+        so it align with teleop's base-frame EE pose output and robot's input presentation.
+        """
+        action_pipeline_steps.append(intervention_step)
+    elif cfg.processor.inverse_kinematics is not None and kinematics_solver is not None:
+        """
+        OG design: 
+        both teleop and policy output delte EE pose, but robot recive joint positions.
+        so placing `intervention_step` before IK step to save EE pose in `TransitionKey.ACTION` to `TELEOP_ACTION_KEY`
+         before it was convert to joint pos.
+        """
+        action_pipeline_steps.append(intervention_step)
+        
         inverse_kinematics_steps = [
             MapTensorToDeltaActionDictStep(
                 use_gripper=cfg.processor.gripper.use_gripper if cfg.processor.gripper is not None else False
@@ -510,6 +582,7 @@ def make_processors(
         ]
         action_pipeline_steps.extend(inverse_kinematics_steps)
         action_pipeline_steps.append(RobotActionToPolicyActionProcessorStep(motor_names=motor_names))
+    
 
     return DataProcessorPipeline(
         steps=env_pipeline_steps, to_transition=identity_transition, to_output=identity_transition
@@ -527,6 +600,10 @@ def step_env_and_process_transition(
 ) -> EnvTransition:
     """
     Execute one step with processor pipeline.
+
+    NOTE: when `use_pre_post_processor`, new_transition.action will first be modify by 
+        action_processor(pre-processor) then reverse the changes by env_processor. if policy's
+         processors include steps like `RelativeAction` that interact with `action` field.
 
     Args:
         env: The robot environment

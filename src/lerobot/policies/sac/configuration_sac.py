@@ -101,7 +101,7 @@ class SACConfig(PreTrainedConfig):
     )
 
     # Statistics for normalizing different types of inputs
-    dataset_stats: dict[str, dict[str, list[float]]] | None = field(
+    dataset_stats: dict[str, dict[str, list[float] | list[list[list[float]]]]] | None = field(
         default_factory=lambda: {
             OBS_IMAGE: {
                 "mean": [0.485, 0.456, 0.406],

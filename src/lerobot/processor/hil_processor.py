@@ -344,6 +344,71 @@ class TeleopRewardProcessorStep(ProcessorStep):
     ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
         return features
 
+@dataclass
+@ProcessorStepRegistry.register("aic_intervention_action_processor")
+class AICInterventionActionProcessorStep(ProcessorStep):
+    """
+    AIC-specific intervention step that maps teleop action dictionaries to tensors
+    using an explicit action key ordering.
+    """
+
+    action_keys: list[str]
+    terminate_on_success: bool = True
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        action = transition.get(TransitionKey.ACTION)
+        if not isinstance(action, PolicyAction):
+            raise ValueError(f"Action should be a PolicyAction type got {type(action)}")
+
+        info = transition.get(TransitionKey.INFO, {})
+        complementary_data = transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
+        teleop_action = complementary_data.get(TELEOP_ACTION_KEY, {})
+        is_intervention = info.get(TeleopEvents.IS_INTERVENTION, False)
+        terminate_episode = info.get(TeleopEvents.TERMINATE_EPISODE, False)
+        success = info.get(TeleopEvents.SUCCESS, False)
+        rerecord_episode = info.get(TeleopEvents.RERECORD_EPISODE, False)
+
+        new_transition = transition.copy()
+
+        if is_intervention and teleop_action is not None:
+            if isinstance(teleop_action, dict):
+                action_list = [float(teleop_action.get(key, 0.0)) for key in self.action_keys]
+            elif isinstance(teleop_action, np.ndarray):
+                action_list = teleop_action.tolist()
+            else:
+                action_list = teleop_action
+
+            teleop_action_tensor = torch.tensor(action_list, dtype=action.dtype, device=action.device)
+            new_transition[TransitionKey.ACTION] = teleop_action_tensor
+
+        new_transition[TransitionKey.DONE] = bool(terminate_episode) or (
+            self.terminate_on_success and success
+        )
+        new_transition[TransitionKey.REWARD] = float(success)
+
+        info = new_transition.get(TransitionKey.INFO, {})
+        info[TeleopEvents.IS_INTERVENTION] = is_intervention
+        info[TeleopEvents.RERECORD_EPISODE] = rerecord_episode
+        info[TeleopEvents.SUCCESS] = success
+        new_transition[TransitionKey.INFO] = info
+
+        complementary_data = new_transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
+        complementary_data[TELEOP_ACTION_KEY] = new_transition.get(TransitionKey.ACTION)
+        new_transition[TransitionKey.COMPLEMENTARY_DATA] = complementary_data
+
+        return new_transition
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            "action_keys": self.action_keys,
+            "terminate_on_success": self.terminate_on_success,
+        }
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
 
 @ProcessorStepRegistry.register("gym_hil_adapter_processor")
 class GymHILAdapterProcessorStep(ProcessorStep):

@@ -42,6 +42,7 @@ from .gym_action_processor import (
     Torch2NumpyActionProcessorStep,
 )
 from .hil_processor import (
+    AICInterventionActionProcessorStep,
     AddTeleopActionAsComplimentaryDataStep,
     AddTeleopEventsAsInfoStep,
     GripperPenaltyProcessorStep,
@@ -87,6 +88,7 @@ from .tokenizer_processor import ActionTokenizerProcessorStep, TokenizerProcesso
 
 __all__ = [
     "ActionProcessorStep",
+    "AICInterventionActionProcessorStep",
     "AddTeleopActionAsComplimentaryDataStep",
     "AddTeleopEventsAsInfoStep",
     "ComplementaryDataProcessorStep",

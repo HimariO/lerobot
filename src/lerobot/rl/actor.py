@@ -60,7 +60,7 @@ from torch.multiprocessing import Event, Queue
 from lerobot.cameras import opencv  # noqa: F401
 from lerobot.configs import parser
 from lerobot.configs.train import TrainRLServerPipelineConfig
-from lerobot.policies.factory import make_policy
+from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.sac.modeling_sac import SACPolicy
 from lerobot.rl.process import ProcessSignalHandler
 from lerobot.rl.queue import get_last_item_from_queue
@@ -78,6 +78,7 @@ from lerobot.transport.utils import (
 )
 from lerobot.types import TransitionKey
 from lerobot.utils.device_utils import get_safe_torch_device
+from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.transition import (
@@ -236,9 +237,24 @@ def act_with_policy(
         logging.info("Actor policy process logging initialized")
 
     logging.info("make_env online")
+    policy_preprocessor = None
+    policy_postprocessor = None
+    if cfg.use_policy_pre_post_processors:
+        policy_preprocessor, policy_postprocessor = make_pre_post_processors(
+            policy_cfg=cfg.policy,
+            pretrained_path=str(cfg.policy.pretrained_path) if cfg.policy.pretrained_path else None,
+            dataset_stats=getattr(cfg.policy, "dataset_stats", None),
+        )
 
     online_env, teleop_device = make_robot_env(cfg=cfg.env)
-    env_processor, action_processor = make_processors(online_env, teleop_device, cfg.env, cfg.policy.device)
+    env_processor, action_processor = make_processors(
+        online_env,
+        teleop_device,
+        cfg.env,
+        cfg.policy.device,
+        policy_preprocessor=policy_preprocessor,
+        policy_postprocessor=policy_postprocessor,
+    )
 
     set_seed(cfg.seed)
     device = get_safe_torch_device(cfg.policy.device, log=True)
@@ -283,7 +299,8 @@ def act_with_policy(
             return
 
         observation = {
-            k: v for k, v in transition[TransitionKey.OBSERVATION].items() if k in cfg.policy.input_features
+            k: v for k, v in transition[TransitionKey.OBSERVATION].items() 
+            if k in cfg.policy.input_features
         }
 
         # Time policy inference and check if it meets FPS requirement
@@ -312,6 +329,8 @@ def act_with_policy(
 
         # Teleop action is the action that was executed in the environment
         # It is either the action from the teleop device or the action from the policy
+        # `InterventionActionProcessorStep` will fill in the policy action if no intervention happened
+        # NOTE: "action" field will contain action modified by post-processor that may not suitable for training
         executed_action = new_transition[TransitionKey.COMPLEMENTARY_DATA]["teleop_action"]
 
         reward = new_transition[TransitionKey.REWARD]
@@ -742,4 +761,7 @@ def use_threads(cfg: TrainRLServerPipelineConfig) -> bool:
 
 
 if __name__ == "__main__":
-    actor_cli()
+    from loguru import logger
+    register_third_party_plugins()
+    with logger.catch(reraise=True):
+        actor_cli()

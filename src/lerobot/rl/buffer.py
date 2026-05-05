@@ -25,7 +25,7 @@ from tqdm import tqdm
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import ACTION, DONE, OBS_IMAGE, REWARD
-from lerobot.utils.transition import Transition
+from lerobot.utils.transition import Transition, move_transition_to_device
 
 
 class BatchTransition(TypedDict):
@@ -422,6 +422,7 @@ class ReplayBuffer:
         use_drq: bool = True,
         storage_device: str = "cpu",
         optimize_memory: bool = False,
+        transition_processor_hook: Callable[[Transition], Transition] | None = None,
     ) -> "ReplayBuffer":
         """
         Convert a LeRobotDataset into a ReplayBuffer.
@@ -447,6 +448,7 @@ class ReplayBuffer:
         if capacity < len(lerobot_dataset):
             raise ValueError(
                 "The capacity of the ReplayBuffer must be greater than or equal to the length of the LeRobotDataset."
+                f" {capacity=} < {len(lerobot_dataset)=}"
             )
 
         # Create replay buffer with image augmentation and DrQ settings
@@ -461,7 +463,11 @@ class ReplayBuffer:
         )
 
         # Convert dataset to transitions
-        list_transition = cls._lerobotdataset_to_transitions(dataset=lerobot_dataset, state_keys=state_keys)
+        list_transition = cls._lerobotdataset_to_transitions(
+            dataset=lerobot_dataset,
+            state_keys=state_keys,
+            transition_processor_hook=transition_processor_hook,
+        )
 
         # Initialize the buffer with the first transition to set up storage tensors
         if list_transition:
@@ -488,6 +494,7 @@ class ReplayBuffer:
             for k, v in data.items():
                 if isinstance(v, dict):
                     for key, tensor in v.items():
+                        # if tensor is None: breakpoint()
                         v[key] = tensor.to(storage_device)
                 elif isinstance(v, torch.Tensor):
                     data[k] = v.to(storage_device)
@@ -615,6 +622,7 @@ class ReplayBuffer:
     def _lerobotdataset_to_transitions(
         dataset: LeRobotDataset,
         state_keys: Sequence[str] | None = None,
+        transition_processor_hook: Callable[[Transition], Transition] | None = None,
     ) -> list[Transition]:
         """
         Convert a LeRobotDataset into a list of RL (s, a, r, s', done) transitions.
@@ -730,6 +738,8 @@ class ReplayBuffer:
                 truncated=truncated,
                 complementary_info=complementary_info,
             )
+            if transition_processor_hook is not None:
+                transition = transition_processor_hook(transition)
             transitions.append(transition)
 
         return transitions
