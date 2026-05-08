@@ -228,6 +228,8 @@ def act_with_policy(
         transitions_queue: Queue to send transitions to the learner.
         interactions_queue: Queue to send interactions to the learner.
     """
+    assert cfg.policy is not None
+    
     # Initialize logging for multiprocessing
     if not use_threads(cfg):
         log_dir = os.path.join(cfg.output_dir, "logs")
@@ -312,6 +314,7 @@ def act_with_policy(
         log_policy_frequency_issue(policy_fps=policy_fps, cfg=cfg, interaction_step=interaction_step)
 
         # Use the new step function
+        # NOTE: entire transition has been processed by the env-processor in the end of `step_env_and_process_transition`
         new_transition = step_env_and_process_transition(
             env=online_env,
             transition=transition,

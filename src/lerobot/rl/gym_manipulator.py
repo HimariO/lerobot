@@ -619,9 +619,10 @@ def step_env_and_process_transition(
 
     # Create action transition
     transition[TransitionKey.ACTION] = action
-    transition[TransitionKey.OBSERVATION] = (
-        env.get_raw_joint_positions() if hasattr(env, "get_raw_joint_positions") else {}
-    )
+    if hasattr(env, "get_raw_joint_positions"):
+        transition[TransitionKey.OBSERVATION] = (
+            env.get_raw_joint_positions()
+        )
     processed_action_transition = action_processor(transition)
     processed_action = processed_action_transition[TransitionKey.ACTION]
 

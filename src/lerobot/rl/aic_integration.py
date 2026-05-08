@@ -265,7 +265,6 @@ class AICRobotEnv(gym.Env):
                     arr = raw_value.astype(np.float32).reshape(-1)
                     break
             if arr is None:
-                breakpoint()
                 raise ValueError(f"{source_key} is missing from env observation")
 
         expected_dim = int(np.prod(shape))
@@ -389,7 +388,9 @@ class AICRobotEnv(gym.Env):
         self, *, seed: int | None = None, options: dict[str, Any] | None = None
     ) -> tuple[RobotObservation, dict[str, Any]]:
         # use speical `AICCheatCodeTeleop` method to reset env through gz ros and aic-bringup
-        self.teleop_device.reset_gz_sim()
+        self.teleop_device.clean_gz_sim()
+        self.teleop_device.home_robot()
+        self.teleop_device.setup_gz_sim()
 
         if self.reset_time_s > 0:
             time.sleep(self.reset_time_s)
@@ -417,11 +418,11 @@ class AICRobotEnv(gym.Env):
             action_dict = {
                 self.action_keys[idx]: float(action_values[idx]) for idx in range(len(self.action_keys))
             }
-
+        # breakpoint()
         self.robot.send_action(action_dict)
         obs = self._get_observation()
         self.current_step += 1
-        return obs, 0.0, False, False, {TeleopEvents.IS_INTERVENTION: False}
+        return obs, 0.0, False, False, {}
 
     def close(self) -> None:
         if self.robot.is_connected:

@@ -112,7 +112,7 @@ class TeleoperateConfig:
     teleop: TeleoperatorConfig
     robot: RobotConfig
     # Limit the maximum frames per second.
-    fps: int = 60
+    fps: int = 20
     teleop_time_s: float | None = None
     # Display all cameras on screen
     display_data: bool = False
