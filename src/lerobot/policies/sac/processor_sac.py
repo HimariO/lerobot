@@ -68,6 +68,7 @@ def make_sac_pre_post_processors(
         exclude_joints=getattr(config, "relative_exclude_joints", []),
         action_names=getattr(config, "action_feature_names", None),
         convert_relative_quat_to_rotvec=True,
+        use_ee_frame_pose=True,
     )
 
     img_key = config.image_features[0]
