@@ -16,18 +16,47 @@
 
 import sys
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 import torch
+from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.policies.sac.configuration_sac import SACConfig
 from lerobot.rl.buffer import BatchTransition, ReplayBuffer, random_crop_vectorized
 from lerobot.utils.constants import ACTION, DONE, OBS_IMAGE, OBS_STATE, OBS_STR, REWARD
 from tests.fixtures.constants import DUMMY_REPO_ID
+from tests.utils import require_package
 
 
 def state_dims() -> list[str]:
     return [OBS_IMAGE, OBS_STATE]
+
+
+def create_policy_processor_hook_cfg() -> SimpleNamespace:
+    policy_cfg = SACConfig()
+    policy_cfg.device = "cpu"
+    policy_cfg.use_relative_actions = True
+    policy_cfg.input_features = {
+        OBS_IMAGE: PolicyFeature(type=FeatureType.VISUAL, shape=(3, 84, 84)),
+        OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(10,)),
+    }
+    policy_cfg.output_features = {
+        ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(4,)),
+    }
+    policy_cfg.normalization_mapping = {
+        FeatureType.VISUAL: NormalizationMode.IDENTITY,
+        FeatureType.STATE: NormalizationMode.MEAN_STD,
+        FeatureType.ACTION: NormalizationMode.MIN_MAX,
+    }
+    policy_cfg.dataset_stats = {
+        OBS_STATE: {"mean": torch.zeros(10), "std": torch.ones(10)},
+        ACTION: {"min": torch.full((4,), -1.0), "max": torch.ones(4)},
+    }
+    policy_cfg.pretrained_path = None
+
+    return SimpleNamespace(use_policy_pre_post_processors=True, policy=policy_cfg)
 
 
 @pytest.fixture
@@ -465,6 +494,54 @@ def test_from_lerobot_dataset(tmp_path):
         assert torch.equal(
             replay_buffer.states[OBS_STATE][i],
             reconverted_buffer.next_states[OBS_STATE][i],
+        )
+
+
+@require_package("grpcio", "grpc")
+def test_lerobot_dataset_to_replay_buffer_to_lerobot_dataset_consistency_with_learner_hooks(tmp_path):
+    from lerobot.rl.learner import make_post_processor_hook, make_transition_processor_hook
+
+    cfg = create_policy_processor_hook_cfg()
+    original_dataset, _ = create_dataset_from_replay_buffer(tmp_path)
+
+    transition_hook = make_transition_processor_hook(cfg=cfg)
+    post_hook = make_post_processor_hook(cfg=cfg)
+    assert transition_hook is not None
+    assert post_hook is not None
+
+    replay_buffer = ReplayBuffer.from_lerobot_dataset(
+        original_dataset,
+        state_keys=list(state_dims()),
+        device="cpu",
+        capacity=len(original_dataset),
+        use_drq=False,
+        transition_processor_hook=transition_hook,
+    )
+
+    roundtrip_root = tmp_path / "roundtrip_with_learner_hooks"
+    roundtrip_dataset = replay_buffer.to_lerobot_dataset(
+        DUMMY_REPO_ID,
+        root=roundtrip_root,
+        post_processor_hook=post_hook,
+    )
+
+    assert len(roundtrip_dataset) == len(original_dataset)
+    assert roundtrip_dataset.num_episodes == original_dataset.num_episodes
+    assert roundtrip_dataset.num_frames == original_dataset.num_frames
+
+    for i in range(len(original_dataset)):
+        original_sample = original_dataset[i]
+        roundtrip_sample = roundtrip_dataset[i]
+
+        torch.testing.assert_close(roundtrip_sample[ACTION], original_sample[ACTION], rtol=1e-4, atol=1e-5)
+        torch.testing.assert_close(roundtrip_sample[OBS_STATE], original_sample[OBS_STATE], rtol=1e-4, atol=1e-5)
+        torch.testing.assert_close(roundtrip_sample[REWARD], original_sample[REWARD])
+        assert torch.equal(roundtrip_sample[DONE], original_sample[DONE])
+        torch.testing.assert_close(
+            roundtrip_sample[OBS_IMAGE],
+            original_sample[OBS_IMAGE],
+            rtol=0.45,
+            atol=0.006,
         )
 
 

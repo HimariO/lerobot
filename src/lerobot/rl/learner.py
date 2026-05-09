@@ -68,7 +68,7 @@ from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.sac.modeling_sac import SACPolicy
-from lerobot.processor import TransitionKey
+from lerobot.processor import TransitionKey, create_transition
 from lerobot.rl.buffer import ReplayBuffer, concatenate_batch_transitions
 from lerobot.rl.process import ProcessSignalHandler
 from lerobot.rl.wandb_utils import WandBLogger
@@ -84,6 +84,7 @@ from lerobot.transport.utils import (
 )
 from lerobot.utils.constants import (
     ACTION,
+    DONE,
     OBS_STATE,
     CHECKPOINTS_DIR,
     LAST_CHECKPOINT_LINK,
@@ -748,17 +749,25 @@ def save_training_checkpoint(
     # NOTE: Handle the case where the dataset repo id is not specified in the config
     # eg. RL training without demonstrations data
     repo_id_buffer_save = cfg.env.task if dataset_repo_id is None else dataset_repo_id
-    replay_buffer.to_lerobot_dataset(repo_id=repo_id_buffer_save, fps=fps, root=dataset_dir)
+    replay_post_processor_hook = make_post_processor_hook(cfg=cfg)
+    replay_buffer.to_lerobot_dataset(
+        repo_id=repo_id_buffer_save,
+        fps=fps,
+        root=dataset_dir,
+        post_processor_hook=replay_post_processor_hook,
+    )
 
     if offline_replay_buffer is not None:
         dataset_offline_dir = os.path.join(cfg.output_dir, "dataset_offline")
         if os.path.exists(dataset_offline_dir) and os.path.isdir(dataset_offline_dir):
             shutil.rmtree(dataset_offline_dir)
+        offline_post_processor_hook = make_post_processor_hook(cfg=cfg)
 
         offline_replay_buffer.to_lerobot_dataset(
             cfg.dataset.repo_id,
             fps=fps,
             root=dataset_offline_dir,
+            post_processor_hook=offline_post_processor_hook,
         )
 
     logging.info("Resume training")
@@ -1073,6 +1082,68 @@ def make_transition_processor_hook(
         return processed_transition
 
     return _process_transition
+
+
+def make_post_processor_hook(
+    cfg: TrainRLServerPipelineConfig,
+) -> Callable[[dict], dict] | None:
+    """Create an optional export hook that maps policy-space replay data back to robot space."""
+    if not cfg.use_policy_pre_post_processors:
+        return None
+
+    policy_cfg = copy.deepcopy(cfg.policy)
+    policy_cfg.device = "cpu"  # HACK: processors include a step to move data to policy device.
+
+    policy_preprocessor, policy_postprocessor = make_pre_post_processors(
+        policy_cfg=policy_cfg,
+        pretrained_path=str(cfg.policy.pretrained_path) if cfg.policy.pretrained_path else None,
+        dataset_stats=getattr(cfg.policy, "dataset_stats", None),
+    )
+    # Keep only the postprocessor unnormalization step for state reverse mapping.
+    state_postprocessor = copy.deepcopy(policy_postprocessor[:1])
+    if state_postprocessor.steps and hasattr(state_postprocessor.steps[0], "features"):
+        state_postprocessor.steps[0].features = {**cfg.policy.input_features, **cfg.policy.output_features}
+    state_keys = tuple(cfg.policy.input_features.keys())
+
+    def _process_frame(frame: dict) -> dict:
+        processed_frame = dict(frame)
+
+        state_batch = {key: processed_frame[key] for key in state_keys if key in processed_frame}
+        if state_batch:
+            # Reverse state normalization in policy space -> robot space.
+            state_transition = state_postprocessor._forward(create_transition(observation=state_batch))
+            reversed_state = state_transition[TransitionKey.OBSERVATION]
+            for key in state_keys:
+                if key in reversed_state:
+                    processed_frame[key] = reversed_state[key]
+
+            # Refresh metadata for stateful post-processing (e.g. relative->absolute actions).
+            policy_preprocessor(dict(reversed_state))
+
+        action = processed_frame.get(ACTION)
+        if not isinstance(action, torch.Tensor):
+            raise ValueError("Expected tensor action before policy postprocessing in replay export hook.")
+
+        squeeze_action = action.ndim <= 1
+        action_batch = action.unsqueeze(0) if squeeze_action else action
+        processed_action = policy_postprocessor(action_batch)
+        if not isinstance(processed_action, torch.Tensor):
+            raise ValueError("Expected tensor action after policy postprocessing in replay export hook.")
+
+        if squeeze_action and processed_action.ndim >= 2 and processed_action.shape[0] == 1:
+            processed_action = processed_action.squeeze(0)
+        processed_frame[ACTION] = processed_action
+
+        done_value = processed_frame.get(DONE, False)
+        if isinstance(done_value, torch.Tensor):
+            done_value = bool(done_value.reshape(-1)[0].item())
+        if done_value:
+            policy_preprocessor.reset()
+            policy_postprocessor.reset()
+
+        return processed_frame
+
+    return _process_frame
 
 # Utilities/Helpers functions
 

@@ -519,6 +519,7 @@ class ReplayBuffer:
         fps=1,
         root=None,
         task_name="from_replay_buffer",
+        post_processor_hook: Callable[[Transition], Transition] | None = None,
     ) -> LeRobotDataset:
         """
         Converts all transitions in this ReplayBuffer into a single LeRobotDataset object.
@@ -567,6 +568,7 @@ class ReplayBuffer:
             robot_type=None,
             features=features,
             use_videos=True,
+            streaming_encoding=True,
         )
 
         # Start writing images if needed
@@ -601,6 +603,9 @@ class ReplayBuffer:
                     # Non-tensor values can be used directly
                     else:
                         frame_dict[f"complementary_info.{key}"] = val
+
+            if post_processor_hook is not None:
+                frame_dict = post_processor_hook(frame_dict)
 
             # Add to the dataset's buffer
             lerobot_dataset.add_frame(frame_dict)

@@ -104,6 +104,11 @@ def test_exclude_joints_supports_partial_name_matching():
     assert step._build_mask(len(names)) == [True, False, True, False]
 
 
+def test_relative_step_get_config_includes_use_ee_frame_pose():
+    step = RelativeActionsProcessorStep(enabled=True, use_ee_frame_pose=False)
+    assert step.get_config()["use_ee_frame_pose"] is False
+
+
 def _assert_quaternion_equivalent(actual: torch.Tensor, expected: torch.Tensor, atol: float = 1e-5) -> None:
     actual = actual / actual.norm(dim=-1, keepdim=True).clamp_min(1e-8)
     expected = expected / expected.norm(dim=-1, keepdim=True).clamp_min(1e-8)
@@ -240,6 +245,44 @@ def test_pose_relative_rotvec_mode_ignores_w_slot_on_postprocess():
     modified[..., 6] = 123.456
     recovered = absolute_step({TransitionKey.ACTION: modified})[TransitionKey.ACTION]
     _assert_quaternion_equivalent(recovered[..., 3:7], action[..., 3:7], atol=1e-5)
+
+
+def test_pose_relative_base_frame_option_changes_translation_and_roundtrips():
+    names = [
+        "tcp_pose.position.x",
+        "tcp_pose.position.y",
+        "tcp_pose.position.z",
+        "tcp_pose.orientation.x",
+        "tcp_pose.orientation.y",
+        "tcp_pose.orientation.z",
+        "tcp_pose.orientation.w",
+    ]
+    ee_relative_step = RelativeActionsProcessorStep(
+        enabled=True, action_names=names, use_ee_frame_pose=True
+    )
+    ee_absolute_step = AbsoluteActionsProcessorStep(enabled=True, relative_step=ee_relative_step)
+    base_relative_step = RelativeActionsProcessorStep(
+        enabled=True, action_names=names, use_ee_frame_pose=False
+    )
+    base_absolute_step = AbsoluteActionsProcessorStep(enabled=True, relative_step=base_relative_step)
+
+    half_sqrt2 = math.sqrt(0.5)
+    state = torch.tensor([[1.0, 2.0, 0.0, 0.0, 0.0, half_sqrt2, half_sqrt2]], dtype=torch.float32)
+    action = torch.tensor([[2.0, 2.0, 0.0, 0.0, 0.0, 1.0, 0.0]], dtype=torch.float32)
+    transition = batch_to_transition({ACTION: action, OBS_STATE: state})
+
+    relative_ee = ee_relative_step(transition)[TransitionKey.ACTION]
+    relative_base = base_relative_step(transition)[TransitionKey.ACTION]
+
+    torch.testing.assert_close(relative_ee[..., :3], torch.tensor([[0.0, -1.0, 0.0]]), atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(relative_base[..., :3], torch.tensor([[1.0, 0.0, 0.0]]), atol=1e-5, rtol=1e-5)
+
+    recovered_ee = ee_absolute_step({TransitionKey.ACTION: relative_ee})[TransitionKey.ACTION]
+    recovered_base = base_absolute_step({TransitionKey.ACTION: relative_base})[TransitionKey.ACTION]
+    torch.testing.assert_close(recovered_ee[..., :3], action[..., :3], atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(recovered_base[..., :3], action[..., :3], atol=1e-5, rtol=1e-5)
+    _assert_quaternion_equivalent(recovered_ee[..., 3:7], action[..., 3:7], atol=1e-5)
+    _assert_quaternion_equivalent(recovered_base[..., 3:7], action[..., 3:7], atol=1e-5)
 
 
 # Chunk-level relative stats test
