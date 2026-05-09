@@ -495,6 +495,10 @@ def record_loop(
             frame[DONE] = frame[SUCCESS_SIGNAL_KEY]
             dataset.add_frame(frame)
 
+            if frame[DONE]:
+                print("Recording stop on DONE")
+                break
+
         if display_data:
             log_rerun_data(
                 observation=obs_processed, action=action_values, compress_images=display_compressed_images

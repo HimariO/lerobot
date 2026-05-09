@@ -30,6 +30,7 @@ from lerobot.processor import (
     RelativeActionsProcessorStep,
     RenameObservationsProcessorStep,
     UnnormalizerProcessorStep,
+    ImageCropResizeProcessorStep,
 )
 from lerobot.processor.converters import policy_action_to_transition, transition_to_policy_action
 from lerobot.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PREPROCESSOR_DEFAULT_NAME
@@ -69,12 +70,18 @@ def make_sac_pre_post_processors(
         convert_relative_quat_to_rotvec=True,
     )
 
+    img_key = config.image_features[0]
+    _, feat_h, feat_w = config.input_features[img_key].shape
+
     # Add remaining processors
     input_steps = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
         DeviceProcessorStep(device=config.device),
         relative_step,
+        ImageCropResizeProcessorStep(
+            resize_size=(feat_h, feat_w),
+        ),
         NormalizerProcessorStep(
             features={**config.input_features, **config.output_features},
             norm_map=config.normalization_mapping,
