@@ -410,6 +410,67 @@ class AICInterventionActionProcessorStep(ProcessorStep):
         return features
 
 
+@dataclass
+@ProcessorStepRegistry.register("action_slice_processor")
+class ActionSliceProcessorStep(ProcessorStep):
+
+    slices: list[slice]
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        action = transition.get(TransitionKey.ACTION)
+
+        new_transition = transition.copy()
+        if action is not None:
+            # breakpoint()
+            if not isinstance(action, PolicyAction):
+                raise ValueError(f"Action should be a PolicyAction type got {type(action)}")
+            new_transition[TransitionKey.ACTION] = action[*self.slices]
+
+        return new_transition
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            "slices": self.slices,
+        }
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+
+@dataclass
+@ProcessorStepRegistry.register("action_pad_processor")
+class ActionPadProcessorStep(ProcessorStep):
+
+    pad_pre_post: list[tuple[int, int]]
+
+    def __call__(self, transition: EnvTransition) -> EnvTransition:
+        action = transition.get(TransitionKey.ACTION)
+        if not isinstance(action, PolicyAction):
+            raise ValueError(f"Action should be a PolicyAction type got {type(action)}")
+
+        new_transition = transition.copy()
+        pad_size_reverse = []
+        for pair in self.pad_pre_post[::-1]:
+            pad_size_reverse.extend(pair)
+        # breakpoint()
+        action_pad = torch.nn.functional.pad(action, tuple(pad_size_reverse), mode='constant', value=0.0)
+        new_transition[TransitionKey.ACTION] = action_pad
+
+        return new_transition
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            "pad_pre_post": self.pad_pre_post,
+        }
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+
 @ProcessorStepRegistry.register("gym_hil_adapter_processor")
 class GymHILAdapterProcessorStep(ProcessorStep):
     """

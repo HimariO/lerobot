@@ -31,6 +31,8 @@ from lerobot.processor import (
     RenameObservationsProcessorStep,
     UnnormalizerProcessorStep,
     ImageCropResizeProcessorStep,
+    ActionSliceProcessorStep,
+    ActionPadProcessorStep,
 )
 from lerobot.processor.converters import policy_action_to_transition, transition_to_policy_action
 from lerobot.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PREPROCESSOR_DEFAULT_NAME
@@ -70,6 +72,15 @@ def make_sac_pre_post_processors(
         convert_relative_quat_to_rotvec=True,
         use_ee_frame_pose=True,
     )
+    if config.use_relative_actions:
+        assert getattr(config, "action_feature_names", None) is not None
+    if config.use_relative_actions:
+        rel_act_dead_col_pre = [ActionSliceProcessorStep(slices=[slice(None), slice(0, 6)])]
+        rel_act_dead_col_post = [ActionPadProcessorStep(pad_pre_post=[(0, 0), (0, 1),])]
+    else:
+        rel_act_dead_col_pre = []
+        rel_act_dead_col_post = []
+
 
     img_key = config.image_features[0]
     _, feat_h, feat_w = config.input_features[img_key].shape
@@ -83,6 +94,7 @@ def make_sac_pre_post_processors(
         ImageCropResizeProcessorStep(
             resize_size=(feat_h, feat_w),
         ),
+        *rel_act_dead_col_pre,
         NormalizerProcessorStep(
             features={**config.input_features, **config.output_features},
             norm_map=config.normalization_mapping,
@@ -93,6 +105,7 @@ def make_sac_pre_post_processors(
         UnnormalizerProcessorStep(
             features=config.output_features, norm_map=config.normalization_mapping, stats=dataset_stats
         ),
+        *rel_act_dead_col_post,
         AbsoluteActionsProcessorStep(enabled=config.use_relative_actions, relative_step=relative_step),
         DeviceProcessorStep(device="cpu"),
     ]

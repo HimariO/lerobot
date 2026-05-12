@@ -52,6 +52,8 @@ from .hil_processor import (
     RewardClassifierProcessorStep,
     TeleopRewardProcessorStep,
     TimeLimitProcessorStep,
+    ActionSliceProcessorStep,
+    ActionPadProcessorStep,
 )
 from .normalize_processor import NormalizerProcessorStep, UnnormalizerProcessorStep, hotswap_stats
 from .observation_processor import VanillaObservationProcessorStep

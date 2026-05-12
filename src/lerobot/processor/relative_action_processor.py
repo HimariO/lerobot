@@ -442,6 +442,8 @@ class RelativeActionsProcessorStep(ProcessorStep):
 
         mask = self._build_mask(action.shape[-1])
         pose_specs = self._build_pose_specs(action.shape[-1])
+        if self.convert_relative_quat_to_rotvec:
+            assert len(pose_specs) > 0
         if pose_specs:
             new_transition[TransitionKey.ACTION] = to_relative_actions_with_pose_specs(
                 action,
