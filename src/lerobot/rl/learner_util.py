@@ -289,8 +289,8 @@ def process_transitions(
                 TeleopEvents.IS_INTERVENTION,
                 complementary_info.get(TeleopEvents.IS_INTERVENTION.value, False),
             )
-            if dataset_repo_id is not None and is_intervention:
-                offline_replay_buffer.add(**transition)
+            # if dataset_repo_id is not None and is_intervention:
+            #     offline_replay_buffer.add(**transition)
 
 
 def process_interaction_messages(
@@ -345,8 +345,7 @@ def make_transition_processor_hook(
         processed_state_batch = policy_preprocessor(state_batch)
         processed_next_state = policy_preprocessor(dict(transition["next_state"]))
 
-        # NOTE: take the raw Robot Action to align the behavior with action_processor in actor env.
-        # processed_action = transition[ACTION] 
+        # NOTE: applied norm and relative action convert to RobotAction send by actor.
         processed_action = processed_state_batch.pop(ACTION, transition[ACTION])
         if not isinstance(processed_action, torch.Tensor):
             raise ValueError("Expected tensor action after policy preprocessing in offline replay hook.")
